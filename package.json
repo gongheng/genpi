@@ -1,0 +1,48 @@
+{
+  "name": "genpi",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "description": "机器强制的开发循环 TUI，基于 pi",
+  "bin": {
+    "genpi": "./bin/genpi.mjs"
+  },
+  "engines": {
+    "node": ">=22.19"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gongheng/genpi.git"
+  },
+  "keywords": [
+    "cli",
+    "agent",
+    "workflow",
+    "tui",
+    "pi",
+    "coding-agent"
+  ],
+  "files": [
+    "dist",
+    "bin",
+    "README.md",
+    "LICENSE",
+    "docs"
+  ],
+  "scripts": {
+    "build": "tsup src/cli.ts src/config.ts src/agent/step-runner.ts src/engine/bootstrap.ts src/resources/index.ts --format esm --dts --outDir dist && node scripts/copy-resources.mjs",
+    "test": "vitest run",
+    "check:resources": "node scripts/check-resources.mjs",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run check:resources && npm test && npm run build"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^1.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

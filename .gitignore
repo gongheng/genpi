@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.log
+.genpi/
+.worktrees/
+.DS_Store
+.idea/
+
+# 私有禁词（来源项目代号等，不随开源分发）
+scripts/forbidden.local.txt
