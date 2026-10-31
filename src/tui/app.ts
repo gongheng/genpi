@@ -80,6 +80,7 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
     return 1;
   }
   const pi = await import("@earendil-works/pi-coding-agent");
+  const piSdk = pi; // 别名：genpiExtension 参数 pi(ExtensionAPI) 遮蔽模块导入，渲染器需引模块命名空间（T32）
   const agentDir = applyDataRoot(opts.home ?? homedir());
 
   // ---- genpi 侧状态（闭包，扩展与引擎共享） ----
@@ -97,7 +98,9 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
   let booted = false; // session_start 幂等守卫：pi 启动期可能多次触发（init/信任重绑），欢迎只发一次
 
   function say(text: string): void {
-    apiRef?.sendMessage({ customType: "genpi/progress", content: text, display: true });
+    // T32：sendMessage 空闲路径双渲染（message_start + entry_appended 都 addMessageToChat，pi 怪癖，
+    // 曾致欢迎块成对出现）；改走 appendEntry + 自注册渲染器——单路径渲染，且 custom entry 不入 LLM 上下文
+    apiRef?.appendEntry("genpi/progress", { text });
   }
   function status(text: string | undefined): void {
     uiRef?.setStatus("genpi", text);
@@ -267,7 +270,7 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
         return { action: "continue" }; // T27：闲聊放行——pi 原生会话直接回答，不建 run 不落产物；不预回显（原生已记录）
       }
       say(`正在理解需求…`);
-      apiRef?.sendMessage({ customType: "genpi/user", content: `› ${request}`, display: true });
+      apiRef?.appendEntry("genpi/user", { text: `› ${request}` });
       // v1.7：新需求优先——自动搁置旧活跃 run（台账保留，入口永不阻塞）；chat 不触发搁置
       const active = (await ledger.listRuns(opts.projectRoot)).find((r) => r.status === "active" || r.status === "gate");
       if (active) {
@@ -309,6 +312,15 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
   // ---- genpi 编排扩展（inline factory，随 pi 会话装载） ----
   const genpiExtension = (pi: ExtensionAPI): void => {
     apiRef = pi;
+    // T32 渲染通道：custom entry 无 renderer 不显示（addCustomEntryToChat 直接 return）——注册渲染器
+    // 用 CustomMessageComponent（与原 custom message 同组件，视觉一致），仅 entry_appended 单路径渲染
+    const asText = (data: unknown): string => String((data as { text?: string } | undefined)?.text ?? "");
+    pi.registerEntryRenderer("genpi/progress", (entry) =>
+      new piSdk.CustomMessageComponent({ role: "custom", customType: "genpi/progress", content: asText(entry.data), display: true, timestamp: Date.parse(entry.timestamp) || Date.now() }),
+    );
+    pi.registerEntryRenderer("genpi/user", (entry) =>
+      new piSdk.CustomMessageComponent({ role: "custom", customType: "genpi/user", content: asText(entry.data), display: true, timestamp: Date.parse(entry.timestamp) || Date.now() }),
+    );
     // /genpi-stop：废弃当前 run（台账保留，可 --resume）——卡死时的 TUI 内出口（契约 19）
     pi.registerCommand("genpi-stop", {
       description: "废弃当前 run（台账保留，可 --resume 续跑）",
@@ -358,12 +370,16 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
           // v1.7：打开不再自动复活旧 run——只提示，用户主导（continue 续跑 / 新需求自动搁置旧的）；v1.8：stopped（中断/搁置/耗尽）同样可续跑
           const resumable = runs.filter((r) => r.status === "active" || r.status === "gate" || r.status === "stopped").at(-1);
           pendingResume = resumable?.id ?? null;
-          say(renderWelcome());
+          // T32 根治：欢迎/续跑提示改走 widget——聊天容器的启动期消息会被 pi 双添加
+          // （entry_appended 实时路径 + renderInitialMessages 追加式重画，不清空容器）；
+          // widget 按键替换天然单份，且欢迎语仅空闲时相关，开跑/首输入即隐
+          const welcomeLines = renderWelcome().split("\n");
           if (resumable) {
-            say(`⏸ 有未完成循环「${resumable.title ?? resumable.id}」（${resumable.id}）\n回「继续」续跑 · /genpi-stop 放弃 · 直接输入新需求将自动搁置它（台账保留）`);
+            welcomeLines.push("", `⏸ 有未完成循环「${resumable.title ?? resumable.id}」（${resumable.id}）`, "回「继续」续跑 · /genpi-stop 放弃 · 直接输入新需求将自动搁置它（台账保留）");
           }
+          uiRef?.setWidget("genpi-welcome", welcomeLines);
         } catch {
-          say(renderWelcome());
+          uiRef?.setWidget("genpi-welcome", renderWelcome().split("\n"));
         }
       })();
     });
@@ -372,7 +388,8 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
       if (ctx.model) lastModel = `${ctx.model.provider}/${ctx.model.id}`;
       const text = event.text.trim();
       if (!text) return { action: "continue" };
-      const echoUser = () => pi.sendMessage({ customType: "genpi/user", content: `› ${text}`, display: true });
+      uiRef?.setWidget("genpi-welcome", undefined); // 有输入即隐欢迎浮层（仅空闲相关）
+      const echoUser = () => pi.appendEntry("genpi/user", { text: `› ${text}` });
       // /genpi log [n]：查看当前/最近 run 的转移史尾部（T30 观测性；目标=当前 run→最近完成轮→台账最新）
       const logm = /^\/genpi\s+log(\s+(\d+))?$/i.exec(text);
       if (logm) {

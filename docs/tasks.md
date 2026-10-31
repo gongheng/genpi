@@ -493,6 +493,16 @@ export function describeMigration(m): string;                                   
 
 **验收**：91 用例全绿（screens ⑧ 历史格式化；engine ⑰ 断言 routed/path=feature）；README/onboarding 同步。
 
+## T32 — 欢迎块重复·根因三部曲终章：启动期聊天消息被 pi 追加式双添加（TUI）
+
+**现象**：T21 守卫 + 重建后，打开 TUI 仍现两个完整 `[genpi/progress]` 欢迎块。
+
+**根因链（三轮排查）**：① T21 修「发两次」（session_start 幂等）✓ 必要但不充分；② dist 未重建跑旧码（已加 bin 过期守卫）；③ **真根因（PTY 打点实锤）**：say 仅一次、entry 仅一条（同 id），但 pi 聊天容器把同一组件加两次——`entry_appended` 实时路径 + `renderInitialMessages→renderSessionItems` 追加式重画（不清空容器）：欢迎语落在 init 窗口内，两条路径都吃到。聊天通道对「启动期消息」结构性不安全。
+
+**修复**：欢迎语+续跑提示改走 `setWidget("genpi-welcome")` 浮层——按键替换天然单份、零双添加暴露面；欢迎仅空闲相关，任意输入/开跑即隐。其余 say（路由/摘要/门禁）均在 init 后发生（单路径），保留 appendEntry 通道（custom entry + 自注册渲染器，不进 LLM 上下文）。
+
+**验证**：PTY 驱动（应答终端能力查询，历次 script 方案盲区）端到端——欢迎语整流/末帧均 1 次，[genpi/progress] 标签块 0；91 用例全绿。
+
 ## T14 — 门禁去模态化（防误触 + 产物正文不默认上屏）
 
 **背景**：用户验收反馈两点——①门禁消息把产物正文大量刷屏；②阶段完成后弹出批准/要求修改/终止选择框容易误触。
