@@ -81,8 +81,8 @@ feature/bugfix 在 `.worktrees/<runId>/` 隔离分支上实施，主工作树零
 ## 开发
 
 ```bash
-npm test            # 83 用例（引擎/路由/风险分级/TUI 纯函数/E2E/扩展透传等）
-npm run build       # tsup → dist/
+npm test            # 91 用例（引擎/路由/风险分级/上下文连续性/TUI 纯函数/E2E/扩展透传等）
+npm run build       # tsup → dist/（源码改动后必须重建——genpi 命令运行 dist，未重建会静默跑旧代码；bin 自带过期警告）
 npm run check:resources   # 方法论资源无项目耦合残留
 ```
 
