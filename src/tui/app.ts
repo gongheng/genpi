@@ -109,6 +109,8 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
     if (widgetTimer) return; // 合帧：高频 delta 合并为每 80ms 一次重绘
     widgetTimer = setTimeout(() => {
       widgetTimer = null;
+      // T33：欢迎浮层与步骤浮层同帧替换——两次结构变化并为一次重排（黑屏闪感源头）
+      uiRef?.setWidget("genpi-welcome", undefined);
       uiRef?.setWidget("genpi-stream", renderStepLiveView(live, process.stdout.columns ?? 80));
     }, 80);
   }
@@ -269,8 +271,7 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
         phase = "idle";
         return { action: "continue" }; // T27：闲聊放行——pi 原生会话直接回答，不建 run 不落产物；不预回显（原生已记录）
       }
-      say(`正在理解需求…`);
-      apiRef?.appendEntry("genpi/user", { text: `› ${request}` });
+      apiRef?.appendEntry("genpi/user", { text: `› ${request}` }); // 路由中状态由 footer 呈现，不再发聊天消息（T33 减重排）
       // v1.7：新需求优先——自动搁置旧活跃 run（台账保留，入口永不阻塞）；chat 不触发搁置
       const active = (await ledger.listRuns(opts.projectRoot)).find((r) => r.status === "active" || r.status === "gate");
       if (active) {
@@ -388,7 +389,6 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
       if (ctx.model) lastModel = `${ctx.model.provider}/${ctx.model.id}`;
       const text = event.text.trim();
       if (!text) return { action: "continue" };
-      uiRef?.setWidget("genpi-welcome", undefined); // 有输入即隐欢迎浮层（仅空闲相关）
       const echoUser = () => pi.appendEntry("genpi/user", { text: `› ${text}` });
       // /genpi log [n]：查看当前/最近 run 的转移史尾部（T30 观测性；目标=当前 run→最近完成轮→台账最新）
       const logm = /^\/genpi\s+log(\s+(\d+))?$/i.exec(text);
