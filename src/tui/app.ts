@@ -9,7 +9,7 @@ import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding
 import type { EngineEvent, GateDecision, PathId, StepRunner } from "../types";
 import { applyDataRoot } from "../config";
 import { bootstrap } from "../engine/bootstrap";
-import { routeRequest } from "../router";
+import { heuristicRoute, routeRequest } from "../router";
 import { applyDelta, createStepLiveState, cutBoundary, fmtRoute, fmtStepDigest, formatHistoryLines, gateHint, renderGateBlock, renderStepLiveView, renderWelcome } from "./screens";
 
 export const VERSION = "0.1.0";
@@ -265,13 +265,17 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
     phase = "routing";
     status("路由中…");
     try {
+      // T36：回显先行——路由要等模型（数秒），先让用户看到自己的输入，不再「被吞一会儿才出现」；
+      // 整句闲聊（启发式即时命中）暂缓回显，防止与 pi 原生渲染重复
+      const likelyChat = heuristicRoute(request).path === "chat";
+      if (!likelyChat) apiRef?.appendEntry("genpi/user", { text: `› ${request}` });
       const route = await routeRequest(request, undefined, { allowCodePaths: opts.hasGit !== false, lastRun: lastDone ?? undefined });
       if (route.path === "chat") {
         status(undefined);
         phase = "idle";
-        return { action: "continue" }; // T27：闲聊放行——pi 原生会话直接回答，不建 run 不落产物；不预回显（原生已记录）
+        return { action: "continue" }; // T27：闲聊放行——pi 原生会话直接回答，不建 run 不落产物；原生渲染已含用户输入
       }
-      apiRef?.appendEntry("genpi/user", { text: `› ${request}` }); // 路由中状态由 footer 呈现，不再发聊天消息（T33 减重排）
+      if (likelyChat) apiRef?.appendEntry("genpi/user", { text: `› ${request}` }); // 模型判为工作但启发式判闲聊：补回显
       // v1.7：新需求优先——自动搁置旧活跃 run（台账保留，入口永不阻塞）；chat 不触发搁置
       const active = (await ledger.listRuns(opts.projectRoot)).find((r) => r.status === "active" || r.status === "gate");
       if (active) {
@@ -389,6 +393,11 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
       if (ctx.model) lastModel = `${ctx.model.provider}/${ctx.model.id}`;
       const text = event.text.trim();
       if (!text) return { action: "continue" };
+      // T35：pi 原生命令透传——/resume /new /theme 等斜杠命令曾被 input 接管当需求路由
+      // （实测 /resume 被吞成 [genpi/progress] 路由消息，会话选择器永不出现）；genpi 自有命令除外
+      if ((phase === "idle" || phase === "run" || phase === "gate") && text.startsWith("/") && !/^\/genpi\b/i.test(text)) {
+        return { action: "continue" };
+      }
       const echoUser = () => pi.appendEntry("genpi/user", { text: `› ${text}` });
       // /genpi log [n]：查看当前/最近 run 的转移史尾部（T30 观测性；目标=当前 run→最近完成轮→台账最新）
       const logm = /^\/genpi\s+log(\s+(\d+))?$/i.exec(text);
