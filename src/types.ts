@@ -63,7 +63,7 @@ export type EngineEvent =
   | { type: "step_thinking"; runId: RunId; delta: string }
   | { type: "step_tool"; runId: RunId; name: string; detail: string }
   | { type: "agent_question"; runId: RunId; text: string }
-  | { type: "step_finished"; runId: RunId; state: StateId; ok: boolean; /** 步末摘要（T26 聊天流一行化）；aborted 步无摘要由 run_stopped 报 */ summary?: string; aborted?: boolean }
+  | { type: "step_finished"; runId: RunId; state: StateId; ok: boolean; /** 步末摘要（T26 聊天流一行化）；aborted 步无摘要由 run_stopped 报 */ summary?: string; aborted?: boolean; /** 本步落盘产物（T34：聊天摘要指路用） */ artifacts?: string[] }
   | { type: "gate_opened"; runId: RunId; gate: StateId; artifactPath: string; /** 门禁审批对象预览（GATE_MR 为变更摘要；文件型门禁缺省由 TUI 读文件） */ preview?: string }
   | { type: "gate_resolved"; runId: RunId; gate: StateId; decision: GateDecision }
   | { type: "budget_changed"; runId: RunId; state: StateId; remaining: number }

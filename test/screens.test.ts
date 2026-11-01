@@ -80,13 +80,22 @@ describe("chat screens（无选项语义）", () => {
     expect(formatHistoryLines([], 10)).toBe("（无历史记录）");
   });
 
-  it("步末一行摘要（T26）：✓/✗ + summary 首行截 40 字；无摘要只留状态", () => {
+  it("步末一行摘要（T26/T34）：✓/✗ + 边界截断 + 落盘产物指路；无摘要只留状态", () => {
     expect(fmtStepDigest("DESIGN", true, "已写 design.md（23 行）\n含行为契约三节")).toBe("✓ DESIGN · 已写 design.md（23 行）");
     expect(fmtStepDigest("VERIFY", false, "测试未过：3 failed")).toBe("✗ VERIFY · 测试未过：3 failed");
     expect(fmtStepDigest("CLARIFY", true)).toBe("✓ CLARIFY");
     expect(fmtStepDigest("PLAN", true, "\n\n  空行开头\n第二行")).toBe("✓ PLAN · 空行开头"); // 跳过空行取首个非空行
+    // T34：无边界可切的长串硬截 + 省略号
     const long = "x".repeat(60);
-    expect(fmtStepDigest("IMPL", true, long).length).toBeLessThanOrEqual("✓ IMPL · ".length + 40); // 截 40
+    expect(fmtStepDigest("IMPL", true, long)).toBe(`✓ IMPL · ${"x".repeat(40)}…`);
+    // T34：有边界切边界——不再切在引号/括号中间
+    const mixed = "模板可立即用于新项目研发，推荐 git clone 本地仓重建以避开权限限制还有后续内容";
+    expect(fmtStepDigest("RESEARCH", true, mixed)).not.toMatch(/（避$|（$/); // 不以半个括号/断词收尾
+    expect(fmtStepDigest("RESEARCH", true, mixed)).toMatch(/…$/);
+    // T34：落盘产物指路（>2 个收敛为 2+…）
+    expect(fmtStepDigest("RESEARCH", true, "调研完成，结论已落盘", ["conclusion.md"])).toBe("✓ RESEARCH · 调研完成，结论已落盘（→ conclusion.md）");
+    expect(fmtStepDigest("IMPLEMENT", true, "完成 5 个任务", ["tasks.md", "a.ts", "b.ts"])).toContain("（→ tasks.md、a.ts、…）");
+    expect(fmtStepDigest("DESIGN", true, "已写 design.md", [])).not.toContain("→"); // 空产物不指路
   });
 });
 

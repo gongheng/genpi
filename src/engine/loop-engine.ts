@@ -60,6 +60,7 @@ export class LoopEngine {
   private steering = new Map<RunId, string[]>();
   private qa = new Map<RunId, string>();
   private parentCtx = new Map<RunId, { request: string; runDir: string }>(); // 契约 24/A：承接轮的前轮需求与产物目录（start 时解析缓存，进程内有效）
+  private lastSum = new Map<RunId, string>(); // 末步工作态摘要（T34）：实例级——GATE 批准后重新 drive 不清零（局部变量曾致 run_done/会话摘要丢要点）
   private pendingAbort = false; // 会话间隙（建会话/Q&A 等待）收到的中断，下一 step 前消费（契约 19）
   private driving: RunId | null = null; // 当前 drive 循环所属 run：中断仅对活跃循环生效，防跨 run 泄漏毒死新 run
 
@@ -225,7 +226,6 @@ export class LoopEngine {
 
   async #driveLoop(runDir: string, def: PathDef, runId: RunId): Promise<void> {
     let rec = await this.deps.ledger.readRun(runDir);
-    let lastSummary = ""; // 最近工作态摘要（契约 24/E：终态写会话滚动摘要用）
     const chain = chainFor(def, rec.tier); // 契约 20：tier 决定链变体（缺省 t1 全链；旧 run 无 tier 同样回退）
     while (rec.status === "active") {
       const state = rec.currentState;
@@ -242,16 +242,16 @@ export class LoopEngine {
         rec.status = "done";
         await this.deps.ledger.writeRun(runDir, rec);
         await this.deps.ledger.appendHistory(runDir, { ts: now(), from: "ARCHIVE", to: "DONE", event: "run_done" });
-        await this.#logConversation(runId, rec.path, rec.request, "done", lastSummary);
-        this.deps.emit({ type: "run_done", runId, summary: "循环完成" });
+        await this.#logConversation(runId, rec.path, rec.request, "done", this.lastSum.get(runId) ?? "");
+        this.deps.emit({ type: "run_done", runId, summary: this.lastSum.get(runId) || "循环完成" }); // T34：带末步要点（结论即交付的路径尤其需要）
         continue;
       }
       if (state === "DONE") {
         rec.status = "done";
         await this.deps.ledger.writeRun(runDir, rec);
         await this.deps.ledger.appendHistory(runDir, { ts: now(), from: "DONE", to: "DONE", event: "run_done" });
-        await this.#logConversation(runId, rec.path, rec.request, "done", lastSummary);
-        this.deps.emit({ type: "run_done", runId, summary: "循环完成" });
+        await this.#logConversation(runId, rec.path, rec.request, "done", this.lastSum.get(runId) ?? "");
+        this.deps.emit({ type: "run_done", runId, summary: this.lastSum.get(runId) || "循环完成" }); // T34：同上
         continue;
       }
       const gate = def.gates[state];
@@ -277,7 +277,7 @@ export class LoopEngine {
         return;
       }
       if (result.ok) {
-        lastSummary = result.summary;
+        this.lastSum.set(runId, result.summary);
         const next = state === "DEBUG" && def.debugTo ? def.debugTo : chain[chain.indexOf(state) + 1]; // DEBUG 不在链上：诊断完成回修复态（契约 23）
         await this.deps.ledger.appendHistory(runDir, { ts: now(), from: state, to: next, event: state === "DEBUG" ? "debug_to_fix" : "step_ok", evidence: result.evidence, note: result.summary });
         rec.currentState = next;
@@ -348,7 +348,7 @@ export class LoopEngine {
         else if (e.type === "thinking") this.deps.emit({ type: "step_thinking", runId, delta: e.delta });
         else if (e.type === "tool") this.deps.emit({ type: "step_tool", runId, name: e.name, detail: e.detail });
       });
-      this.deps.emit({ type: "step_finished", runId, state, ok: result.ok, ...(result.aborted ? { aborted: true } : { summary: result.summary }) });
+      this.deps.emit({ type: "step_finished", runId, state, ok: result.ok, ...(result.aborted ? { aborted: true } : { summary: result.summary, ...(result.artifacts.length > 0 ? { artifacts: result.artifacts } : {}) }) });
       if (!result.ok || questions.length === 0 || ++rounds >= QA_MAX_ROUNDS) return result;
       for (const q of questions) {
         this.deps.emit({ type: "agent_question", runId, text: q });

@@ -77,11 +77,22 @@ export function formatHistoryLines(rawLines: string[], n = 15): string {
     .join("\n");
 }
 
-/** 步末一行摘要（聊天流）：✓/✗ 状态 · summary 首行截 40 字——叙事不归档（T26，widget 看完即走）。 */
-export function fmtStepDigest(state: string, ok: boolean, summary?: string): string {
+/** 边界截断（T34）：限长内找最后一个标点/空格切齐，避免切在引号/括号中间；无处可切才硬切。 */
+export function cutBoundary(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const head = text.slice(0, max);
+  const b = Math.max(head.lastIndexOf("。"), head.lastIndexOf("！"), head.lastIndexOf("？"), head.lastIndexOf("；"), head.lastIndexOf("，"), head.lastIndexOf("、"), head.lastIndexOf("）"), head.lastIndexOf("」"), head.lastIndexOf("\""), head.lastIndexOf(" "), head.lastIndexOf("\u201c"), head.lastIndexOf("\u201d"));
+  return b >= Math.floor(max * 0.5) ? head.slice(0, b + 1) : head.slice(0, max);
+}
+
+/** 步末一行摘要（聊天流）：✓/✗ 状态 · summary 首行边界截断 · 落盘产物指路（T26/T34，叙事不归档）。 */
+export function fmtStepDigest(state: string, ok: boolean, summary?: string, artifacts?: string[]): string {
   const head = `${ok ? "✓" : "✗"} ${state}`;
   const first = (summary ?? "").split("\n").map((l) => l.trim()).find(Boolean);
-  return first ? `${head} · ${first.slice(0, 40)}` : head;
+  const gist = first ? cutBoundary(first, 40) : "";
+  const ell = first && first.length > 40 ? "…" : "";
+  const files = artifacts && artifacts.length > 0 ? `（→ ${(artifacts.length > 2 ? artifacts.slice(0, 2).concat(["…"]) : artifacts).join("、")}）` : "";
+  return `${head}${gist ? ` · ${gist}${ell}` : ""}${files}`;
 }
 
 // ---------- 步骤实时视图（编辑器上方小部件：思考 / 工具 / 文本尾部） ----------

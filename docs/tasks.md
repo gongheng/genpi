@@ -511,6 +511,15 @@ export function describeMigration(m): string;                                   
 
 **验证**：PTY 注入需求——输入 +1.5s 欢迎仍在（未提前清除）、输入后全屏清屏 0 次、运行 UI（CLARIFY/思考中）正常浮现；91 用例全绿。终端建议：iTerm2/kitty/WezTerm 支持同步输出可根治闪感。
 
+## T34 — 步末摘要优化：边界截断 + 落盘产物指路 + 完成行带要点（TUI/engine）
+
+**现象**：用户实报——结论已写入产物，聊天摘要却硬切在第 40 字（切在引号/括号中间），且不指路（如「✓ RESEARCH · …推荐"git clone 本地仓重建 .git（避开」）。
+
+**改动**：① cutBoundary 边界截断（限长内找最后一个标点/空格切齐，无处可切才硬切+省略号）；② step_finished 事件携带 artifacts，摘要行附产物指路「（→ conclusion.md）」（>2 个收敛为 2+…）；③ run_done 摘要携带末步要点（结论即交付的 research/prd 完成行不再只说「循环完成」），✔ 行边界截 80。
+**顺带修真 bug**：lastSummary 原为 #driveLoop 局部变量——GATE 批准后重新 drive 即清零，feature 的 run_done 与 T24 会话摘要行一直拿到空要点；改实例级 Map（与 steering/qa 同模式）。
+
+**验收**：91 用例全绿（screens digest 边界/指路断言重写、engine ① 扩 artifacts 透传与 run_done 要点）。
+
 ## T14 — 门禁去模态化（防误触 + 产物正文不默认上屏）
 
 **背景**：用户验收反馈两点——①门禁消息把产物正文大量刷屏；②阶段完成后弹出批准/要求修改/终止选择框容易误触。

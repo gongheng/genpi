@@ -84,6 +84,7 @@ describe("LoopEngine", () => {
   it("① feature 全转移：问答→双 GATE 批准→DONE，转移序与路径表一致", async () => {
     const w = makeWorld((spec, n) => {
       if (spec.state === "CLARIFY" && n === 1) return { questions: ["发布时区按什么算？"], result: ok() };
+      if (spec.state === "DESIGN") return { result: ok(["design.md"]) }; // T34：产物落盘
       if (spec.state === "VERIFY") return { result: ok([], [{ command: "npm test", exitCode: 0, outputTail: "3 passed" }]) };
       return { result: ok() };
     });
@@ -108,9 +109,12 @@ describe("LoopEngine", () => {
     const run = JSON.parse(readFileSync(join(w.projectRoot, ".genpi", "runs", runId, "run.json"), "utf8"));
     expect(run.status).toBe("done");
     // T26：step_finished 携带摘要（聊天流一行化数据源）；全部非 aborted
-    const fins = w.events.filter((e) => e.type === "step_finished") as { ok: boolean; summary?: string; aborted?: boolean }[];
+    const fins = w.events.filter((e) => e.type === "step_finished") as { state: string; ok: boolean; summary?: string; aborted?: boolean; artifacts?: string[] }[];
     expect(fins.length).toBeGreaterThanOrEqual(5);
     expect(fins.every((f) => !f.aborted && f.summary === "完成")).toBe(true); // FakeRunner ok() 摘要全为「完成」
+    expect(fins.find((f) => f.state === "DESIGN")?.artifacts).toEqual(["design.md"]); // T34：产物随事件透传
+    const done = w.events.find((e) => e.type === "run_done") as { summary: string };
+    expect(done.summary).toBe("完成"); // T34：完成行带末步要点（结论即交付的路径不再只说「循环完成」）
   });
 
   it("② GATE 死等：无 decide() 不得转移（契约 3）", async () => {

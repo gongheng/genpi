@@ -10,7 +10,7 @@ import type { EngineEvent, GateDecision, PathId, StepRunner } from "../types";
 import { applyDataRoot } from "../config";
 import { bootstrap } from "../engine/bootstrap";
 import { routeRequest } from "../router";
-import { applyDelta, createStepLiveState, fmtRoute, fmtStepDigest, formatHistoryLines, gateHint, renderGateBlock, renderStepLiveView, renderWelcome } from "./screens";
+import { applyDelta, createStepLiveState, cutBoundary, fmtRoute, fmtStepDigest, formatHistoryLines, gateHint, renderGateBlock, renderStepLiveView, renderWelcome } from "./screens";
 
 export const VERSION = "0.1.0";
 
@@ -186,7 +186,7 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
         break;
       case "step_finished":
         streaming = false; // 步末（含问答间隙）不再抢 escape
-        if (!e.aborted) say(fmtStepDigest(e.state, e.ok, e.summary)); // T26：一行摘要；aborted 由 run_stopped 报，不双报
+        if (!e.aborted) say(fmtStepDigest(e.state, e.ok, e.summary, e.artifacts)); // T26 一行摘要 + T34 产物指路；aborted 由 run_stopped 报
         break;
       case "gate_opened":
         endStreamWidget();
@@ -195,7 +195,7 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
         break;
       case "run_done":
         endStreamWidget();
-        say(`✔ ${e.summary}`);
+        say(`✔ ${cutBoundary(e.summary, 80)}`); // T34：完成行带要点（结论即交付的路径），边界截断防切半句
         status(undefined);
         void captureLastDone(e.runId); // 契约 24：记最近完成轮，供下一轮 followUp 承接
         currentRunId = null;
