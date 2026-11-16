@@ -328,11 +328,45 @@ export function composePrompt(spec: StepSpec): string {
     .join("\n\n");
 }
 
+/** 列表行（T40）：❓ 引导句后的模板/选项体——checkbox/无序/有序列表项。 */
+const LIST_LINE = /^\s*(?:[-*+]\s|\d+[.)]\s|\[[ xX]\])/;
+
+/**
+ * 提取问题块（T40 块修复）：❓ 行 + 紧随的列表行为同一问题（多行体）。
+ * 背景：模型常把「勾选模板」写在 ❓ 引导句下方（多行 checkbox 列表）；旧版只取 ❓ 行，
+ * 模板本体丢失——加上 T26 叙事不归档与 ask() 的 endStreamWidget，用户只看到孤零引导句，
+ * 无从作答。规则：吸收紧跟 ❓ 的列表行；允许空行分隔的松散列表（空行后仍是列表项则继续）；
+ * 非问题区的普通列表不受影响（吸收仅从 ❓ 行开始）。
+ */
 export function extractQuestions(text: string): string[] {
-  return text
-    .split("\n")
-    .filter((l) => l.trim().startsWith("❓"))
-    .map((l) => l.trim().replace(/^❓\s*/, ""));
+  const lines = text.split("\n");
+  const qs: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i]!;
+    if (!line.trim().startsWith("❓")) {
+      i++;
+      continue;
+    }
+    const block = [line.trim().replace(/^❓\s*/, "")];
+    let j = i + 1;
+    while (j < lines.length) {
+      const l = lines[j]!;
+      if (LIST_LINE.test(l)) {
+        block.push(l.trim());
+        j++;
+        continue;
+      }
+      if (l.trim() === "" && LIST_LINE.test(lines[j + 1] ?? "")) {
+        j++; // 松散列表：空行分隔的列表项继续吸收
+        continue;
+      }
+      break;
+    }
+    qs.push(block.join("\n"));
+    i = j;
+  }
+  return qs;
 }
 
 /** 解析末尾 yaml 结果块（受限子集手写解析，避免引入 yaml 依赖）。 */

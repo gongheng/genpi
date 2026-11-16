@@ -146,6 +146,7 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
       new Promise<string>((resolve) => {
         endStreamWidget();
         say(`❓ ${q}`);
+        say("（直接输入回复后回车；模板题可整段复制修改后发回）"); // T40：无弹窗是设计（契约 18 去模态化），但必须给出作答方式
         phase = "awaiting-answer";
         answerResolver = resolve;
       }),

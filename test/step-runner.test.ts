@@ -55,6 +55,28 @@ describe("step-runner", () => {
     }
   });
 
+  it("①b T40 块提取：❓ 引导句吸收紧跟的模板/选项列表（多行问题体）", () => {
+    // 用户实报场景：勾选模板写在引导句下方
+    const tmpl = [
+      "❓ 请按以下模板勾选回复（默认即推荐值，不同意处改掉即可）：",
+      "- [ ] 技术栈：TypeScript + React",
+      "- [x] 部署：Vercel",
+      "2. 数据库：Postgres",
+      "",
+      "- [ ] 预算：500 元以内", // 松散列表：空行分隔的列表项继续吸收
+      "",
+      "以上齐备即进入下一阶段。", // 非列表行：吸收终止
+    ].join("\n");
+    expect(extractQuestions(tmpl)).toEqual([
+      ["请按以下模板勾选回复（默认即推荐值，不同意处改掉即可）：", "- [ ] 技术栈：TypeScript + React", "- [x] 部署：Vercel", "2. 数据库：Postgres", "- [ ] 预算：500 元以内"].join("\n"),
+    ]);
+    // 引导句后直接普通段落：只取 ❓ 行
+    expect(extractQuestions("❓ 时区按什么算？\n普通叙述段落")).toEqual(["时区按什么算？"]);
+    // 非问题区的普通列表不被吸收（吸收仅从 ❓ 行开始）；多问题各自成块
+    const multi = ["背景：", "- 普通列表", "", "❓ 选 A 还是 B？", "1. A", "2. B", "", "❓ 预算多少？"].join("\n");
+    expect(extractQuestions(multi)).toEqual(["选 A 还是 B？\n1. A\n2. B", "预算多少？"]);
+  });
+
   it("② yaml 块解析：evidence/artifacts 结构化", () => {
     const r = parseResult(
       "正文\n```yaml\nok: true\nsummary: 验证通过\nartifacts: [\"design.md\", \"tasks.md\"]\nevidence:\n  - command: npm test\n    exitCode: 0\n    outputTail: 3 passed\n  - command: npm run build\n    exitCode: 1\n    outputTail: error TS123\n```\n后记",
