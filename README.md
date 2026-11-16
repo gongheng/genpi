@@ -105,6 +105,6 @@ genpi update [名称]                 # 更新（缺省全部）
 
 扩展写法与 pi 扩展完全一致，参见 [pi extensions 文档](https://pi.dev/docs/latest/extensions)。另：`bootstrap({ extensions })` 内联工厂是编程注入 seam（genpi 内部编排桥即基于此），不是用户扩展入口。
 
-设计文档：[docs/design.md](docs/design.md)（行为契约 19 条）· 任务清单：[docs/tasks.md](docs/tasks.md) · 学习指南：[docs/onboarding.md](docs/onboarding.md)
+设计文档与任务清单已精简：学习指南见 [docs/onboarding.md](docs/onboarding.md)（架构/契约/演进导览）；行为契约以源码注释（契约 N）与 git 历史为准。
 
 MIT License.

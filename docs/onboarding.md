@@ -1,7 +1,7 @@
 # genpi · 项目学习指南（onboarding）
 
 > 目标读者：第一次接触本仓库、要读懂并改动的开发者。
-> 配套文档：[design.md](design.md)（行为契约 19 条，权威规格）· [tasks.md](tasks.md)（任务切片与演进史）· [README.md](../README.md)（用户视角）。
+> 配套文档：[README.md](../README.md)（用户视角）；行为契约以源码内「契约 N」注释为准，演进史见 git log。
 > 本文回答「代码在哪、为什么这样设计、按什么顺序读」。
 
 ---
@@ -297,7 +297,7 @@ feature/bugfix 在 `.worktrees/<runId>/` 建独立分支（前缀 `feature/`）�
 ## 10. 建议阅读路线（半天到一天）
 
 ```text
-第 1 站（跑通直觉）   npm test → genpi --demo-run → design.md §2.2 状态机
+第 1 站（跑通直觉）   npm test → genpi --demo-run → 本文 §2 状态机
 第 2 站（核心 500 行） types.ts → paths.ts → ledger.ts → loop-engine.ts
                      对照 test/engine.test.ts 逐用例读（⑩⑪⑮⑯ 是契约 19 的活文档）
 第 3 站（两个边界）   agent/step-runner.ts（SDK seam+证据校验）
@@ -306,7 +306,7 @@ feature/bugfix 在 `.worktrees/<runId>/` 建独立分支（前缀 `feature/`）�
                      → engine/bootstrap.ts（组合根）→ engine/tasks.ts
 第 5 站（交互面）     tui/screens.ts（纯函数）→ tui/app.ts（runTui 主线+
                      genpiExtension 两个事件处理器）→ cli.ts → ext-manager.ts
-第 6 站（回归源头）   docs/tasks.md 各 T 节 + git log --oneline 对照
+第 6 站（回归源头）   git log --oneline 对照（各提交说明即演进史）
 ```
 
 ## 11. 常见改动指南

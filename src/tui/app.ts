@@ -76,7 +76,7 @@ export interface RunTuiOptions {
 
 export async function runTui(opts: RunTuiOptions): Promise<number> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    console.log("genpi 需要交互式终端（TTY）。在管道/CI 环境请用：--demo-run（演示）或 headless 引擎（见 docs/design.md）。");
+    console.log("genpi 需要交互式终端（TTY）。在管道/CI 环境请用：--demo-run（演示）或 headless 引擎（见 docs/onboarding.md）。");
     return 1;
   }
   const pi = await import("@earendil-works/pi-coding-agent");
