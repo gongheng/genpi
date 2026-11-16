@@ -57,6 +57,7 @@ genpi --demo-run         # 无模型演示模式
 - **模型角色**：`.genpi/config.json` 可配 `models.implementer` / `models.reviewer` / `models.router`（如 `"prov/model-id"`），对应状态自动切换（router 为路由分类小快模型，降延迟与成本）；其余状态跟随 TUI 里 `/model` 当前选择，缺省用全局默认。环境变量凭证（`ANTHROPIC_API_KEY` 等）无需 auth.json 也可直接使用。
 - **证据强制（v1.10）**：VERIFY 自报命令与真实执行交叉校验之上，恒真式构造（`npm test || true` 等）机器拒绝；tasks.md 验收命令升格为固定验收命令（pinned），模型无权自选/省略/替换；自报产物存在性校验——未落盘的产物进不了门禁。
 - **成本与清理可见（v1.10）**：每步 token 用量落台账（步末摘要与 `/genpi log` 可见）；`genpi clean [--force]` 清理终态 run 的 worktree/分支（干跑列示，台账保留）；`worktreeSetup` 配置项解决新 worktree 依赖引导（如 `"npm ci"`）。
+- **codemode 沙箱脚本（v1.10）**：步骤会话已启用 pi 的 codemode 工具——批量机械操作（跨文件重命名、批量格式化、重复结构改写）由模型写脚本一次完成，嵌套工具调用不进上下文，长任务显著省 token；脚本内 bash 仍走工具管道，证据校验照常生效。
 - **验证失败自动诊断（契约 23）**：VERIFY 失败不盲目重试——自动转 DEBUG 诊断（定位根因、产出修复方案），回修复态带着诊断修，修好再验；3 轮修不好如实停下转人工。
 - **验证证据机器校验**：VERIFY 等状态的自报命令证据与会话内真实 bash 执行记录交叉校验，伪造 exitCode 或无法机器复核即判失败（两阶段 done 的第二阶段是真验证）。
 - **无 git 目录**：feature/bugfix 自动降级为 research 并说明原因（代码路径需要隔离分支）。

@@ -175,7 +175,7 @@ while (rec.status === "active") {
 ### 5.3 StepRunner（step-runner.ts）——唯一的 SDK 边界
 
 - **可测性**：`setSessionFactoryForTest()` 可注入 mock 会话，全部引擎测试无需真模型；
-- **会话构造**：`createAgentSessionServices` + `ModelRuntime`（按 agentDir 缓存免冷启动）+ `resolveCliModel` 解析角色模型；
+- **会话构造**：`createAgentSessionServices` + `ModelRuntime`（按 agentDir 缓存免冷启动）+ `resolveCliModel` 解析角色模型；**codemode 工具显式装载+激活**（T39：SDK 会话默认连注册都没有——builtin 装载是 CLI 路径待遇；`createCodemodeExtension()` 入 extensionFactories + `setActiveToolsByName` 增量激活。沙箱脚本嵌套工具调用不进上下文，批量机械操作省 token；嵌套调用走同一工具管道，证据交叉校验照常生效）；
 - **模型三级优先**（契约 16）：`config.models[role]`（implementer/reviewer；另有 `models.router` 供路由分类用小快模型，降延迟与成本）> 交互会话当前模型（跟随 `/model`）> 全局默认；
 - **两阶段 done 的机器验证**（v1.6，契约 4）：收集会话内 `tool_execution_*` 真实 bash 执行记录，与模型自报 `evidence[].exitCode` **交叉校验**——VERIFY 态自报命令无真实执行对应、或 exitCode 不符 → 直接 fail（伪造证据）。这是"agent 宣称→机器验证"第二阶段的实现。v1.10 补强三件：①**恒真式审计** `masksExitCode`——VERIFY 自报命令含 `||`/`;`/`|`/`$(`/反引号/行首 `!`/末尾单 `&` 即 fail（`npm test || true` 骗不过；`&&`/重定向不掩错放行）；②**pinned 固定验收**——每条必须真实执行且 exit 0，模型无权自选/省略/替换；③**产物存在性** `checkArtifacts`——自报 artifacts 逐个在 artifactRoots（运行目录/工作目录/绝对路径）下 existsSync，未落盘进不了门禁（契约 4a）。
 - **token 用量聚合**（契约 24a，v1.10）：订阅 `message_end`（assistant.usage）聚合 in/out → StepResult.usage → 事件与台账；失败重跑也计量（成本诚实）。

@@ -79,13 +79,17 @@ async function defaultFactory(
   opts: { cwd: string; model?: string; extensions?: InlineExtension[]; additionalExtensionPaths?: string[] },
 ): Promise<SessionLike> {
   // services 化：modelRuntime 可按角色解析 Model 对象（契约 16）；会话仍持久（genpi 数据根）供审计
+  // T39：codemode 工具（沙箱脚本，嵌套工具调用不进上下文）——SDK 会话默认连注册都没有（builtin 装载是
+  // CLI 路径待遇，defaultActive:false）；genpi 显式装载+激活：IMPLEMENT/DEBUG 批量机械操作省 token 降 compaction。
+  // 零新依赖：createCodemodeExtension 从已依赖的包根导出；嵌套调用走同一工具管道，tool_execution_* 事件
+  // 照发——契约 4 证据交叉校验与恒真式审计对脚本内命令同样生效。
   const pi = await loadPi();
   const services = await pi.createAgentSessionServices({
     cwd: opts.cwd,
     agentDir: pi.getAgentDir(),
     modelRuntime: (await getModelRuntime(pi, pi.getAgentDir())) as never, // 缓存：每 step 不再冷启动读盘
     resourceLoaderOptions: {
-      ...(opts.extensions?.length ? { extensionFactories: opts.extensions } : {}),
+      extensionFactories: [pi.createCodemodeExtension(), ...(opts.extensions ?? [])],
       ...(opts.additionalExtensionPaths?.length ? { additionalExtensionPaths: opts.additionalExtensionPaths } : {}),
     },
   });
@@ -99,6 +103,8 @@ async function defaultFactory(
     sessionManager: pi.SessionManager.create(opts.cwd),
     ...(model ? { model: model as never } : {}),
   });
+  // T39：注册是 defaultActive:false——显式激活（增量，不动其余工具集）
+  session.setActiveToolsByName([...session.getActiveToolNames(), "codemode"]);
   // SAFETY: SDK AgentSession 结构满足 SessionLike（prompt/subscribe/getLastAssistantText/dispose/abort），
   // 历史验证于 step-runner 测试——双 cast 仅抹平 SDK 类型参数差异，运行时形状一致。
   return session as unknown as SessionLike;
