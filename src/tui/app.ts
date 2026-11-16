@@ -261,7 +261,9 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
     return `（产物预览不可用，路径：${path}）`;
   }
 
-  async function beginRun(request: string): Promise<{ action: "continue" } | { action: "handled" }> {
+  // T37：beginRun 只被后台调用（handler 同步返回 handled）——闲聊放行改走 pi.sendUserMessage
+  // （程序化发送，不触发 input 事件），路由全程不再吊住 pi 主循环。
+  async function beginRun(request: string): Promise<void> {
     phase = "routing";
     status("路由中…");
     try {
@@ -273,7 +275,16 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
       if (route.path === "chat") {
         status(undefined);
         phase = "idle";
-        return { action: "continue" }; // T27：闲聊放行——pi 原生会话直接回答，不建 run 不落产物；原生渲染已含用户输入
+        // T27：闲聊放行——pi 原生会话直接回答，不建 run 不落产物；原生渲染已含用户输入。
+        // T37：原路径靠 handler 返回 continue 交给 pi，现在 handler 已同步返回，改程序化发送
+        // 升级自检补丁：①streaming 期提交（连续闲聊第二条）prompt() 会 throw "Agent is already
+        // processing"，传 deliverAs:followUp 改排队下一轮；②ExtensionAPI 类型面声明 void 但运行时裸透传
+        // AgentSession 的 Promise 且无内部兜底——裸调用 reject 即 unhandled rejection 崩 TUI，
+        // Promise.resolve 桥接挂 catch 自报。
+        void Promise.resolve(apiRef?.sendUserMessage(route.text, { deliverAs: "followUp" })).catch((e) => {
+          say(`⚠ ${String(e)}`);
+        });
+        return;
       }
       if (likelyChat) apiRef?.appendEntry("genpi/user", { text: `› ${request}` }); // 模型判为工作但启发式判闲聊：补回显
       // v1.7：新需求优先——自动搁置旧活跃 run（台账保留，入口永不阻塞）；chat 不触发搁置
@@ -285,19 +296,29 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
       currentPath = route.path;
       say(fmtRoute(route.path, route.reason, route.by, { tier: route.tier, waive: route.waive, title: route.title, followUp: route.followUp }));
       // runId 创建即注入、提前进入 run 相位：初始 drive（CLARIFY/DESIGN…）期间 escape/steering 即可用；
-      // await 返回时 run 已停到 gate/done/stopped——phase/currentRunId 以事件为准，不回头覆盖（曾致输入黑洞）；
       // v1.9：tier/CLARIFY 豁免随路由结果透传引擎（契约 20/21）
+      // T37：绝不在 input handler 的 await 链上驱动引擎——engine.start 会一路 await 到 ask() 挂起（Q&A）
+      // 或 gate/done，pi 主循环 `while: await getUserInput(); await session.prompt()` 被吊死在首条 prompt 上，
+      // 期间 onInputCallback 未注册，后续所有提交落入 pi 的 pendingUserInputs 缓冲被静默吞掉
+      // （实测：Q&A ❓ 后输入的答案无回显、无 hint、引擎收不到——「文字没了」根因）。
+      // 后台驱动 + 异常自报；phase/currentRunId 仍以事件为准（run_done/run_stopped/gate_opened）。
       phase = "run";
-      await engine.start(currentPath, route.text, (id) => {
-        currentRunId = id;
-      }, { tier: route.tier, waiveClarify: route.waive, waiveReason: route.reason, title: route.title, parentRunId: route.followUp && lastDone ? lastDone.runId : undefined, routeBy: route.by, routeReason: route.reason });
+      void engine
+        .start(currentPath, route.text, (id) => {
+          currentRunId = id;
+        }, { tier: route.tier, waiveClarify: route.waive, waiveReason: route.reason, title: route.title, parentRunId: route.followUp && lastDone ? lastDone.runId : undefined, routeBy: route.by, routeReason: route.reason })
+        .catch((e) => {
+          say(`⚠ ${String(e)}`);
+          currentRunId = null;
+          phase = "idle";
+          status(undefined);
+        });
     } catch (e) {
       say(`⚠ ${String(e)}`);
       currentRunId = null;
       phase = "idle";
       status(undefined);
     }
-    return { action: "handled" };
   }
 
   async function resumeRun(runId: string): Promise<void> {
@@ -427,8 +448,13 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
         return { action: "handled" };
       }
       const r = routeUserInput(phase, currentRunId, text, pendingResume !== null);
-      // T27：start 路由先行——chat 放行时不回显（pi 原生已记录用户消息），工作路径由 beginRun 内回显
-      if (r.target === "start") return beginRun(text);
+      // T27：start 路由先行——chat 放行时不回显（pi 原生已记录用户消息），工作路径由 beginRun 内回显；
+      // T37：start 只后台启动，handler 同步返回——input handler 的 await 链一旦吊住（路由/引擎驱动），
+      // pi 主循环破在首条 prompt 上，后续输入全部静默落入 pendingUserInputs 缓冲（问答答案被吞根因）
+      if (r.target === "start") {
+        void beginRun(text);
+        return { action: "handled" };
+      }
       echoUser();
       switch (r.target) {
         case "answer":

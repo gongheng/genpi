@@ -530,6 +530,19 @@ export function describeMigration(m): string;                                   
 
 **验证（PTY 时间轴实测）**：/resume 后零路由消息；输入→回显 **0.15s**，输入→路线行 7.5s（模型路由耗时，期间 footer 路由中…）；完整链路（回显→路由→worktree→CLARIFY 思考流）dump 正常。测量陷阱存档：驱动脚本对终端颜色查询的应答被编辑器吸收为文本污染回显，精确匹配失配——非产品缺陷。
 
+## T37 — Q&A 答案被吞修复：input handler 不得吊住 pi 主循环（TUI，严重）
+
+**现象（用户实报，scaffold 项目 prd 路径实测卡死）**：步骤模型在最终文本里以 ❓ 行提问（如「请批准本 PRD（GATE_PRD）…」）→ 引擎 ask() 挂起等答案 → 用户输入答案回车后**文字消失**——无回显、无 hint、引擎收不到，怎么输都石沉大海。
+
+**根因（PTY 复现 + pi 源码三层实锤）**：genpi 的 input handler 对 start 分支 `return beginRun(text)`，而 beginRun 内 `await engine.start(...)` 会一路 await 到 ask() 挂起（或 gate/done）。pi InteractiveMode 主循环是 `while(true){ await getUserInput(); await session.prompt(); }`——prompt() 内部 await 扩展 input handler，首条输入把主循环吊死在引擎驱动上；期间 onInputCallback 未注册，后续所有提交落入 pi 的 pendingUserInputs 缓冲**静默吞掉**（自死锁：答案排在等待答案的 prompt 后面）。PTY 埋点链：编辑器 submitValue ✓ → onSubmit ✓ → 主循环未归 → genpi handler 未触发。
+
+**改动**：
+1. start 分支改 `void beginRun(text)` 后同步返回 handled——engine.start 后台驱动 + .catch 自报（⚠ 消息 + 相位回 idle）；
+2. 闲聊放行改 `pi.sendUserMessage(route.text)`（程序化发送，不触发 input 事件）——handler 的 await 链上只剩秒级路由，不再有长挂点；beginRun 返回 void。
+3. SDK 1.5.2 升级自检补丁：①sendUserMessage 补 `deliverAs:"followUp"`——streaming 期提交第二条闲聊时 pi prompt() 会 throw "Agent is already processing"，排队下一轮而非拒绝；②扩展面 sendUserMessage 类型声明 void 但运行时裸透传 AgentSession 的 Promise 且无内部兑底，裸调用 reject 即 unhandled rejection 崩 TUI——Promise.resolve 桥接挂 .catch 自报。（pi 源码双层实锤：agent-session.d.ts L655 + bundle 透传实现）
+
+**验证（PTY 端到端）**：❓ 后输入答案 → 回显即时出现、RUN#2 7ms 内收到且「已有问答上下文」注入 Q/A → 二轮完成 → GATE_PRD 正常开闸 → r 终止 ✔。91 用例全绿，tsc 零错。（SDK 1.4.0 上验证；1.5.2 升级后重验：91 用例全绿、DTS 通过、build 重建）
+
 ## T14 — 门禁去模态化（防误触 + 产物正文不默认上屏）
 
 **背景**：用户验收反馈两点——①门禁消息把产物正文大量刷屏；②阶段完成后弹出批准/要求修改/终止选择框容易误触。
