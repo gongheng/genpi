@@ -1,7 +1,9 @@
 // StepRunner——pi SDK 唯一适配点（public-API-only）：StepSpec → AgentSession → 事件流/StepResult
 // 扩展透传（契约 17）：内联 extensionFactories + additionalExtensionPaths + pi 三层自动发现
 // 契约 4（v1.6）：bash 真实执行记录（tool_execution_* 事件）与模型自报 evidence 交叉校验，伪造即 fail
-import { join } from "node:path";
+// T38：A1 验收命令强制（复合运算符审计 + pinned 覆盖）/ A2 产物存在性校验 / D6 token 用量聚合
+import { existsSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import type { CommandEvidence, StepEvent, StepResult, StepRunner, StepSpec, StateId } from "../types";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -48,6 +50,19 @@ let piModule: typeof import("@earendil-works/pi-coding-agent") | null = null;
 async function loadPi(): Promise<typeof import("@earendil-works/pi-coding-agent")> {
   piModule ??= await import("@earendil-works/pi-coding-agent");
   return piModule;
+}
+
+/** T38/F8：把 "prov/model-id" 解析为 Model 对象（失败/缺省返回 undefined，回落全局默认）——路由小模型复用 StepRunner 的 ModelRuntime 缓存 */
+export async function resolveCliModelSafe(model?: string): Promise<unknown | undefined> {
+  if (!model) return undefined;
+  try {
+    const pi = await loadPi();
+    const rt = await getModelRuntime(pi, pi.getAgentDir());
+    const resolved = pi.resolveCliModel({ cliModel: model, modelRuntime: rt as never });
+    return resolved.model ?? undefined;
+  } catch {
+    return undefined; // 解析失败回落全局默认（与 defaultFactory 同策略）
+  }
 }
 
 // ModelRuntime 按 agentDir 缓存（读盘/auth 冷启动只做一次；进程内模型目录变更罕见，重启生效）
@@ -121,8 +136,10 @@ export function createPiStepRunner(opts: PiStepRunnerOptions = {}): StepRunner {
         additionalExtensionPaths: opts.additionalExtensionPaths,
       });
       active = session;
-      // 真实 bash 执行记录（机器证据源，契约 4）
+      // 真实 bash 执行记录（机器证据源，契约 4）+ token 用量聚合（T38/D6：message_end.assistant.usage）
       const toolCalls = new Map<string, { command?: string; exitCode?: number; outputTail?: string }>();
+      let usageIn = 0;
+      let usageOut = 0;
       try {
         if (session.id) opts.onSessionId?.(session.id);
         const unsub = session.subscribe((ev) => {
@@ -154,6 +171,12 @@ export function createPiStepRunner(opts: PiStepRunnerOptions = {}): StepRunner {
             else if (ae.type === "toolcall_end" && ae.toolCall) {
               onEvent({ type: "tool", name: ae.toolCall.name ?? "tool", detail: toolDetail(ae.toolCall.arguments) });
             }
+          } else if (e.type === "message_end") {
+            const msg = (e as { message?: { role?: string; usage?: { input?: number; output?: number } } }).message;
+            if (msg?.role === "assistant" && msg.usage) {
+              usageIn += msg.usage.input ?? 0;
+              usageOut += msg.usage.output ?? 0;
+            }
           }
         });
         let text = "";
@@ -171,13 +194,17 @@ export function createPiStepRunner(opts: PiStepRunnerOptions = {}): StepRunner {
         text = session.getLastAssistantText();
         for (const q of extractQuestions(text)) onEvent({ type: "question", text: q });
         const parsed = parseResult(text);
-        // 契约 4（v1.6）：自报证据与真实执行交叉校验——伪造/无法复核即 fail
+        const usage = usageIn + usageOut > 0 ? { input: usageIn, output: usageOut } : undefined;
+        // T38/A2：自报产物存在性机器校验（两阶段 done 产物侧）——缺失即 fail，不进门禁
+        const artCheck = checkArtifacts(parsed.artifacts, spec.artifactRoots ?? [spec.workingDir]);
+        if (!artCheck.ok) return { ...parsed, ok: false, summary: `${parsed.summary}｜⚠ ${artCheck.note}`, ...(usage ? { usage } : {}) };
+        // 契约 4（v1.6）+ T38/A1：自报证据与真实执行交叉校验（含复合运算符审计与 pinned 验收覆盖）
         const real: CommandEvidence[] = [...toolCalls.values()]
           .filter((t): t is { command: string; exitCode: number; outputTail?: string } => typeof t.command === "string" && typeof t.exitCode === "number")
           .map((t) => ({ command: t.command, exitCode: t.exitCode, outputTail: t.outputTail ?? "" }));
-        const check = crossCheckEvidence(parsed.evidence, real, spec.state);
-        if (!check.ok) return { ...parsed, ok: false, summary: `${parsed.summary}｜⚠ ${check.note}` };
-        return parsed;
+        const check = crossCheckEvidence(parsed.evidence, real, spec.state, spec.verifyCommands);
+        if (!check.ok) return { ...parsed, ok: false, summary: `${parsed.summary}｜⚠ ${check.note}`, ...(usage ? { usage } : {}) };
+        return { ...parsed, ...(usage ? { usage } : {}) };
       } finally {
         active = null;
         aborting = false;
@@ -190,8 +217,39 @@ export function createPiStepRunner(opts: PiStepRunnerOptions = {}): StepRunner {
 const normCmd = (c: string): string => c.trim().replace(/\s+/g, " ");
 
 /**
+ * 恒真式审计（T38/A1①，纯函数）：验证命令里能抹掉真实退出码的 shell 构造一律拒绝。
+ * 拒绝：`||`、`;`、`|`（无 pipefail 时取末命令退出码）、`$(...)`、反引号、行首 `!` 取反、末尾单 `&` 后台。
+ * 放行：`&&`（全成功才 0，不掩错）、重定向（不改退出码）、`2>&1`（& 后非空白）。
+ */
+export function masksExitCode(cmd: string): boolean {
+  const c = cmd.trim();
+  if (c.startsWith("!")) return true;
+  if (/[\n;]/.test(c)) return true;
+  if (c.includes("|")) return true;
+  if (c.includes("$(") || c.includes("`")) return true;
+  if (/(^|[^&])&(?=\s|$)/.test(c)) return true;
+  return false;
+}
+
+/**
+ * 产物存在性校验（T38/A2，纯函数）：自报 artifacts 逐个在解析根（绝对路径直接查）下 existsSync，缺失即 fail。
+ */
+export function checkArtifacts(artifacts: string[], roots: string[]): { ok: boolean; note?: string } {
+  const missing: string[] = [];
+  for (const a of artifacts) {
+    const hit = isAbsolute(a) ? existsSync(a) : roots.some((r) => existsSync(join(r, a)));
+    if (!hit) missing.push(a);
+  }
+  if (missing.length === 0) return { ok: true };
+  const shown = missing.slice(0, 3).join("、");
+  return { ok: false, note: `自报产物不存在（两阶段 done 产物侧校验）：${shown}${missing.length > 3 ? ` 等 ${missing.length} 项` : ""}` };
+}
+
+/**
  * 证据交叉校验（契约 4，纯函数）：
  * - 自报命令与真实执行（同命令取最近一次）exitCode 不符 → fail（伪造证据）
+ * - VERIFY 态自报命令含恒真式构造 → fail（T38/A1①：`npm test || true` 骗过交叉校验的洞）
+ * - VERIFY 态固定验收命令（pinned，来自 tasks.md）必须被自报且真实执行 exit 0 → 否则 fail（T38/A1②）
  * - VERIFY 态自报命令无真实执行对应 → fail（无法机器复核）
  * - 非验证态（调研/设计等）无对应则放行（可能引用早前会话或只读操作）
  */
@@ -199,10 +257,21 @@ export function crossCheckEvidence(
   claimed: CommandEvidence[],
   real: CommandEvidence[],
   state: StateId,
+  pinned?: string[],
 ): { ok: boolean; note?: string } {
-  if (claimed.length === 0) return { ok: true };
+  if (claimed.length === 0 && !(state === "VERIFY" && pinned?.length)) return { ok: true };
   const realByCmd = new Map<string, CommandEvidence>();
   for (const r of real) realByCmd.set(normCmd(r.command), r); // 后写覆盖：同命令取最近一次
+  if (state === "VERIFY") {
+    for (const c of claimed) {
+      if (masksExitCode(c.command)) return { ok: false, note: `验证命令含恒真式构造（拒绝）：${c.command}` };
+    }
+    for (const p of pinned ?? []) {
+      const r = realByCmd.get(normCmd(p));
+      if (!r) return { ok: false, note: `固定验收命令未真实执行：${p}` };
+      if (r.exitCode !== 0) return { ok: false, note: `固定验收命令未通过（exit ${r.exitCode}）：${p}` };
+    }
+  }
   for (const c of claimed) {
     const r = realByCmd.get(normCmd(c.command));
     if (!r) {

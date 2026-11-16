@@ -136,7 +136,7 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
   // ---- headless 引擎（契约不变：worktree/预算/台账/门禁） ----
   /** 交互会话当前模型（/model 切换后更新；步骤会话跟随，见 bootstrap defaultModel） */
   let lastModel: string | undefined;
-  const { engine, ledger } = bootstrap({
+  const { engine, ledger, config } = bootstrap({
     projectRoot: opts.projectRoot,
     home: opts.home,
     runner: opts.runner,
@@ -186,7 +186,7 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
         break;
       case "step_finished":
         streaming = false; // 步末（含问答间隙）不再抢 escape
-        if (!e.aborted) say(fmtStepDigest(e.state, e.ok, e.summary, e.artifacts)); // T26 一行摘要 + T34 产物指路；aborted 由 run_stopped 报
+        if (!e.aborted) say(fmtStepDigest(e.state, e.ok, e.summary, e.artifacts, e.usage)); // T26 一行摘要 + T34 产物指路 + T38/D6 用量；aborted 由 run_stopped 报
         break;
       case "gate_opened":
         endStreamWidget();
@@ -271,7 +271,7 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
       // 整句闲聊（启发式即时命中）暂缓回显，防止与 pi 原生渲染重复
       const likelyChat = heuristicRoute(request).path === "chat";
       if (!likelyChat) apiRef?.appendEntry("genpi/user", { text: `› ${request}` });
-      const route = await routeRequest(request, undefined, { allowCodePaths: opts.hasGit !== false, lastRun: lastDone ?? undefined });
+      const route = await routeRequest(request, undefined, { allowCodePaths: opts.hasGit !== false, lastRun: lastDone ?? undefined, routerModel: config.models.router }); // T38/F8：models.router 小快模型降路由延迟与成本
       if (route.path === "chat") {
         status(undefined);
         phase = "idle";

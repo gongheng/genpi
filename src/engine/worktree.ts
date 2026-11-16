@@ -36,13 +36,18 @@ export function createGitOps(exec: ExecFn, opts: GitOpsOptions = {}): GitOps {
       const branch = `${branchPrefix}${runId}`;
       const r = await exec(projectRoot, `git worktree add "${dir}" -b "${branch}"`);
       if (r.code !== 0) {
-        // 已存在（中断恢复）：复用（基线未知，预览退回 HEAD~1）
+        // 已存在（中断恢复）：复用（基线未知，预览退回 HEAD~1）；created=false——不重复依赖引导（T38/C4）
         const reuse = await exec(projectRoot, `git worktree list --porcelain`);
-        if (reuse.out.includes(dir)) return { path: dir, baseSha: undefined };
+        if (reuse.out.includes(dir)) return { path: dir, baseSha: undefined, created: false };
         throw new Error(`worktree 创建失败: ${r.out}`);
       }
       const shaR = await exec(dir, "git rev-parse HEAD");
-      return { path: dir, baseSha: shaR.code === 0 ? shaR.out.trim() : undefined };
+      return { path: dir, baseSha: shaR.code === 0 ? shaR.out.trim() : undefined, created: true };
+    },
+
+    async setup(worktreeDir, command) {
+      const r = await exec(worktreeDir, command);
+      return { code: r.code, out: r.out };
     },
 
     async mrPreview(worktreeDir, baseSha) {
@@ -93,6 +98,65 @@ export function createGitOps(exec: ExecFn, opts: GitOpsOptions = {}): GitOps {
 export function normalizeCompareUrl(remote: string, branch: string): string {
   const m = remote.match(/(?:github\.com|gitlab\.com)[:/]([^/]+)\/([^/.]+)/) ?? remote.match(/gitee\.com[:/]([^/]+)\/([^/.]+)/);
   if (!m) return `${remote} （compare/${branch}）`;
-  const host = remote.includes("gitee.com") ? "gitee.com" : remote.includes("gitlab.com") ? "gitlab.com" : "github.com";
+  let host = "github.com";
+  if (remote.includes("gitee.com")) host = "gitee.com";
+  else if (remote.includes("gitlab.com")) host = "gitlab.com";
   return `https://${host}/${m[1]}/${m[2]}/compare/${branch}?expand=1`;
+}
+
+// ---------- worktree 清理（T38/C5）：genpi clean 干跑列示 / --force 执行；台账（.genpi/runs）永久保留 ----------
+
+export interface CleanupEntry {
+  runId: string;
+  status: string;
+  worktree: string;
+  branch: string;
+  /** worktree 目录现存（不存在则只剩分支可删） */
+  dirExists: boolean;
+}
+
+/** 干跑计划：终态（done/rejected/stopped）且带 worktree 的 run 才入列。纯函数（existsCheck 注入可测）。 */
+export function planCleanup(
+  runs: { id: string; status: string; worktree?: string }[],
+  opts: { worktreeDir: string; branchPrefix: string; existsCheck: (p: string) => boolean },
+): CleanupEntry[] {
+  return runs.flatMap((r) => {
+    const finished = r.status === "done" || r.status === "rejected" || r.status === "stopped";
+    if (!finished || !r.worktree) return [];
+    return [{
+      runId: r.id,
+      status: r.status,
+      worktree: r.worktree,
+      branch: `${opts.branchPrefix}${r.id}`,
+      dirExists: opts.existsCheck(r.worktree),
+    }];
+  });
+}
+
+/** 执行清理：worktree remove（含未提交时 --force 兜底）→ branch -D；单条失败不阻断其余。 */
+export async function executeCleanup(
+  exec: ExecFn,
+  projectRoot: string,
+  entries: CleanupEntry[],
+): Promise<{ runId: string; ok: boolean; note: string }[]> {
+  const results: { runId: string; ok: boolean; note: string }[] = [];
+  for (const e of entries) {
+    const notes: string[] = [];
+    if (e.dirExists) {
+      const rm = await exec(projectRoot, `git worktree remove "${e.worktree}"`);
+      if (rm.code === 0) {
+        notes.push("worktree 已删");
+      } else {
+        const rmf = await exec(projectRoot, `git worktree remove --force "${e.worktree}"`);
+        notes.push(rmf.code === 0 ? "worktree 已删（含未提交变更）" : `worktree 删除失败：${(rmf.out || rm.out).slice(-80)}`);
+      }
+    } else notes.push("worktree 已不存在");
+    const br = await exec(projectRoot, `git branch -D "${e.branch}"`);
+    if (br.code === 0) notes.push(`分支已删：${e.branch}`);
+    else notes.push(`分支删除失败（可能已合入/不存在）：${e.branch}`);
+    const ok = notes.every((n) => !n.includes("失败"));
+    results.push({ runId: e.runId, ok, note: notes.join("；") });
+  }
+  await exec(projectRoot, "git worktree prune");
+  return results;
 }

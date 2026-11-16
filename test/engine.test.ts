@@ -44,6 +44,7 @@ function makeWorld(handler: FakeRunner["handler"], request = "加定时发布") 
   const projectRoot = mkProject();
   const events: EngineEvent[] = [];
   const asked: string[] = [];
+  const setupCalls: { worktreeDir: string; command: string }[] = []; // T38/C4：setup 调用记录
   const config: ResolvedConfig = {
     agentDir: "/tmp/genpi-home",
     mrTarget: "github",
@@ -55,7 +56,11 @@ function makeWorld(handler: FakeRunner["handler"], request = "加定时发布") 
   const resources: ResourceProvider = { byState: (s) => [`方法论:${s}`], preamble: () => "常驻约束" };
   const git: GitOps = {
     async ensureWorktree(root, runId) {
-      return { path: join(root, ".worktrees", runId), baseSha: "f".repeat(40) };
+      return { path: join(root, ".worktrees", runId), baseSha: "f".repeat(40), created: true };
+    },
+    async setup(worktreeDir, command) {
+      setupCalls.push({ worktreeDir, command });
+      return { code: 0, out: "" };
     },
     async mrPreview() {
       return "提交：\n- fake: 改动\n\n变更统计：\n a.txt | 1 +";
@@ -77,7 +82,7 @@ function makeWorld(handler: FakeRunner["handler"], request = "加定时发布") 
       return "好的";
     },
   };
-  return { projectRoot, request, events, asked, deps, runner: deps.runner as FakeRunner };
+  return { projectRoot, request, events, asked, deps, runner: deps.runner as FakeRunner, setupCalls, config };
 }
 
 describe("LoopEngine", () => {
@@ -526,5 +531,93 @@ describe("IMPLEMENT 逐任务循环", () => {
     await new LoopEngine(w.deps).start("research", "承接已删前轮", undefined, { parentRunId: "20990101-0000-research-none" });
     const instr3 = (w.runner.calls.filter((c) => c.instruction.includes("承接已删前轮"))[0]?.instruction ?? "");
     expect(instr3).not.toContain("前轮上下文"); // 前轮不存在：静默降级不崩（契约 10 精神）
+  });
+
+  it("㉕ T38/B3 budget 连续失败语义：成功即重置，跨任务累计不再误杀", async () => {
+    // PLAN 写 2 任务；T1 首次失败后成功（重置），T2 连败 3 次才 STOP——旧实现会在 T2 第 2 败就累计到 0
+    const w = makeWorld((spec, n) => {
+      if (spec.state === "PLAN") {
+        const runDir = /# 运行目录: (\S+)/.exec(spec.instruction)?.[1] ?? "";
+        writeFileSync(join(runDir, "tasks.md"), "# 任务\n- [ ] T1\n- [ ] T2\n");
+        return { result: ok(["tasks.md"]) };
+      }
+      if (spec.state === "IMPLEMENT") {
+        const t = /# 本任务\n(.+)/.exec(spec.instruction)?.[1] ?? "";
+        if (t.startsWith("T1") && n === 1) return { result: fail }; // T1 首试失败
+        if (t.startsWith("T2")) return { result: fail }; // T2 恒败
+        return { result: ok([]) };
+      }
+      return { result: ok() };
+    });
+    const engine = new LoopEngine(w.deps);
+    const runId = await engine.start("feature", "两任务");
+    await engine.decide(runId, { kind: "approve" }); // 过 GATE_DESIGN 进 PLAN→IMPLEMENT（T2 连败在 GATE_MR 前即 STOP）
+    const budgets = w.events.filter((e) => e.type === "budget_changed").map((e) => (e as { remaining: number }).remaining);
+    expect(budgets).toEqual([2, 2, 1, 0]); // T1 败(2)→成功重置→T2 败(2,1,0)
+    const stopped = w.events.find((e) => e.type === "run_stopped") as { reason: string } | undefined;
+    expect(stopped?.reason).toContain("连续失败");
+  });
+
+  it("㉖ T38/C4 worktree.setup：新建后执行一次（失败告警不阻塞）；复用不执行", async () => {
+    const w = makeWorld(() => ({ result: ok() }));
+    w.config.worktreeSetup = "npm ci";
+    const runId = await new LoopEngine(w.deps).start("feature", "需要隔离分支");
+    expect(w.setupCalls.length).toBe(1);
+    expect(w.setupCalls[0]?.command).toBe("npm ci");
+    expect(w.setupCalls[0]?.worktreeDir).toContain(runId);
+    const hist = readFileSync(join(w.projectRoot, ".genpi", "runs", runId, "phase-history.jsonl"), "utf8");
+    expect(hist).toContain("worktree_setup");
+    // 无配置不执行
+    const w2 = makeWorld(() => ({ result: ok() }));
+    await new LoopEngine(w2.deps).start("feature", "无引导配置");
+    expect(w2.setupCalls.length).toBe(0);
+  });
+
+  it("㉗ T38/E7 resume 重建承接上下文：进程重启后 parentCtx 不丢（契约 24/A 不降级）", async () => {
+    let phase1 = true; // 第一阶段：承接轮 RESEARCH 恒败耗尽 budget → stopped（可 resume）；重启后 ok
+    const w = makeWorld((spec) => {
+      if (phase1 && spec.state === "RESEARCH" && spec.instruction.includes("深入刚才")) return { result: fail };
+      return { result: ok() };
+    });
+    const first = await new LoopEngine(w.deps).start("research", "调研登录方案");
+    const second = await new LoopEngine(w.deps).start("research", "深入刚才的方案", undefined, { parentRunId: first });
+    phase1 = false;
+    // 新引擎实例（内存 Map 全新——等价进程重启）；同项目台账
+    const w2 = makeWorld(() => ({ result: ok() }));
+    w2.deps.projectRoot = w.projectRoot;
+    await new LoopEngine(w2.deps).resume(second);
+    const instr = w2.runner.calls[w2.runner.calls.length - 1]?.instruction ?? "";
+    expect(instr).toContain("前轮上下文");
+    expect(instr).toContain("调研登录方案");
+  });
+
+  it("㉘ T38/A1② VERIFY pinned 接线：tasks.md 验收行升格为 spec.verifyCommands + 指令声明；恒真式剔除落史", async () => {
+    const w = makeWorld((spec) => {
+      if (spec.state === "PLAN") {
+        const runDir = /# 运行目录: (\S+)/.exec(spec.instruction)?.[1] ?? "";
+        writeFileSync(join(runDir, "tasks.md"), "# 任务\n- [ ] T1 修复\n  验收：\`node test.js\`\n  验收：\`npm test || true\`\n");
+        return { result: ok(["tasks.md"]) };
+      }
+      return { result: ok() };
+    });
+    const eng = new LoopEngine(w.deps);
+    const rid = await eng.start("feature", "带验收的任务");
+    await eng.decide(rid, { kind: "approve" }); // 过 GATE_DESIGN 进 PLAN→…→VERIFY
+    const verifyCall = w.runner.calls.find((c) => c.state === "VERIFY");
+    expect(verifyCall?.verifyCommands).toEqual(["node test.js"]); // 恒真式被剔除
+    expect(verifyCall?.instruction).toContain("固定验收命令");
+    expect(verifyCall?.instruction).toContain("node test.js");
+    const histAll = readFileSync(join(w.projectRoot, ".genpi", "runs", (w.events[0] as { runId: string }).runId, "phase-history.jsonl"), "utf8");
+    expect(histAll).toContain("verify_pin_dropped");
+    expect(histAll).toContain("npm test || true");
+  });
+
+  it("㉙ T38/D6 用量记账：step_finished 携带 usage，step_ok 落 phase-history", async () => {
+    const w = makeWorld(() => ({ result: { ...ok(), usage: { input: 12000, output: 3400 } } }));
+    await new LoopEngine(w.deps).start("research", "用量记账");
+    const fin = w.events.find((e) => e.type === "step_finished") as { usage?: { input: number; output: number } };
+    expect(fin?.usage).toEqual({ input: 12000, output: 3400 });
+    const hist = readFileSync(join(w.projectRoot, ".genpi", "runs", (w.events.find((e) => e.type === "state_entered") as { runId: string }).runId, "phase-history.jsonl"), "utf8");
+    expect(hist).toContain("in 12.0k/out 3.4k tok");
   });
 });

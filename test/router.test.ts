@@ -122,4 +122,17 @@ describe("router", () => {
     const m = await routeRequest("接着上面做", async () => ({ path: "feature", tier: "t1" as const, waive: false, title: "承接", followUp: true, reason: "承接", by: "model" as const }), { lastRun });
     expect(m.followUp).toBe(true); // 模型分支透传
   });
+
+  it("⑮ T38/F8 routerModel 穿插：routeRequest 把 models.router 传给 classify；前缀强制不经模型", async () => {
+    let seen: { model?: string } | undefined;
+    const classify = async (_req: string, _ctx?: { lastRun?: { runId: string; request: string } }, opts?: { model?: string }) => {
+      seen = opts;
+      return { path: "research" as const, tier: "t1" as const, waive: false, title: "小模型路由", reason: "测试", by: "model" as const };
+    };
+    await routeRequest("调研点东西", classify, { routerModel: "openai/gpt-5-mini" });
+    expect(seen?.model).toBe("openai/gpt-5-mini");
+    seen = undefined;
+    await routeRequest("1 前缀强制需求", classify, { routerModel: "openai/gpt-5-mini" });
+    expect(seen).toBeUndefined(); // 前缀强制不调模型
+  });
 });

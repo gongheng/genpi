@@ -11,6 +11,8 @@ export interface PhaseHistoryEntry {
   evidence?: CommandEvidence[];
   budgetLeft?: number;
   note?: string;
+  /** T38/D6：本步 token 用量（人读格式，如 "in 12.3k/out 1.2k tok"） */
+  usage?: string;
 }
 
 export interface Ledger {

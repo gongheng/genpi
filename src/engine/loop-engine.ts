@@ -6,7 +6,8 @@ import type { ResolvedConfig } from "../config";
 import type { EngineEvent, GateDecision, PathId, RunId, StateId, StepEvent, StepResult, StepRunner, StepSpec, Tier } from "../types";
 import type { Ledger } from "./ledger";
 import { chainFor, PATHS, type PathDef } from "./paths";
-import { parseUnchecked, tick } from "./tasks";
+import { extractAcceptanceCommands, parseUnchecked, tick } from "./tasks";
+import { masksExitCode } from "../agent/step-runner";
 
 export interface ResourceProvider {
   byState(state: StateId): string[];
@@ -14,7 +15,9 @@ export interface ResourceProvider {
 }
 
 export interface GitOps {
-  ensureWorktree(projectRoot: string, runId: string, branchPrefix: string, worktreeDir: string): Promise<{ path: string; baseSha?: string }>;
+  ensureWorktree(projectRoot: string, runId: string, branchPrefix: string, worktreeDir: string): Promise<{ path: string; baseSha?: string; created: boolean }>;
+  /** T38/C4：worktree 新建后依赖引导（如 npm ci）；失败由引擎告警不阻塞 */
+  setup(worktreeDir: string, command: string): Promise<{ code: number; out: string }>;
   mrPreview(worktreeDir: string, baseSha?: string): Promise<string | null>;
   pushAndMr(worktreeDir: string, opts: { mrTarget: string; runId: string; summary: string }): Promise<{ mode: "mr" | "manual"; url: string }>;
 }
@@ -113,6 +116,16 @@ export class LoopEngine {
       rec.worktree = wt.path;
       rec.baseSha = wt.baseSha;
       await this.deps.ledger.writeRun(runDir, rec);
+      // T38/C4：新 worktree 无 gitignored 依赖（node_modules 等）——首次创建后跑用户配置的引导命令，
+      // 否则第一次 VERIFY 必白烧一轮 budget + DEBUG 循环才发现「依赖没装」；失败告警不阻塞（网络抖动不该拦死循环）
+      if (wt.created && this.deps.config.worktreeSetup) {
+        const s = await this.deps.git.setup(wt.path, this.deps.config.worktreeSetup);
+        await this.deps.ledger.appendHistory(runDir, {
+          ts: now(),
+          from: "INIT", to: "INIT", event: "worktree_setup",
+          note: s.code === 0 ? this.deps.config.worktreeSetup : `引导失败(exit ${s.code})，后续验证可能因依赖缺失失败：${s.out.slice(-140)}`,
+        });
+      }
     }
     await this.drive(runDir, def);
     return runId;
@@ -121,6 +134,16 @@ export class LoopEngine {
   async resume(runId: RunId): Promise<void> {
     const runDir = await this.deps.ledger.runDir(this.deps.projectRoot, runId);
     const rec = await this.deps.ledger.readRun(runDir);
+    // T38/E7：承接上下文从台账重建（不信内存——进程重启后 parentCtx 丢失，契约 24/A 不应降级）
+    if (rec.parentRunId && !this.parentCtx.has(runId)) {
+      try {
+        const pDir = await this.deps.ledger.runDir(this.deps.projectRoot, rec.parentRunId);
+        const pRec = await this.deps.ledger.readRun(pDir);
+        this.parentCtx.set(runId, { request: pRec.request, runDir: pDir });
+      } catch {
+        /* 前轮已删除：静默降级（与 start 同策略） */
+      }
+    }
     const def = PATHS[rec.path];
     if (rec.status === "done" || rec.status === "rejected") throw new Error(`run ${runId} 状态 ${rec.status} 不可恢复`);
     if (rec.status === "gate" || (rec.status === "stopped" && def.gates[rec.currentState])) {
@@ -278,8 +301,15 @@ export class LoopEngine {
       }
       if (result.ok) {
         this.lastSum.set(runId, result.summary);
+        // T38/B3：契约 6 是「连续失败」语义——成功即重置该态 budget（VERIFY 例外见下）；
+        // 旧实现 per-state 终身累计：IMPLEMENT 8 任务跨任务掽 3 次即 STOP，与契约 6 措辞不符。
+        // VERIFY 不重置（其成功即离态，重置无意义——保留累计恰恰实现契约 23「fail budget 为诊断循环封顶」）
+        if (state !== "VERIFY" && rec.budget[state] !== undefined) {
+          delete rec.budget[state];
+          await this.deps.ledger.writeRun(runDir, rec);
+        }
         const next = state === "DEBUG" && def.debugTo ? def.debugTo : chain[chain.indexOf(state) + 1]; // DEBUG 不在链上：诊断完成回修复态（契约 23）
-        await this.deps.ledger.appendHistory(runDir, { ts: now(), from: state, to: next, event: state === "DEBUG" ? "debug_to_fix" : "step_ok", evidence: result.evidence, note: result.summary });
+        await this.deps.ledger.appendHistory(runDir, { ts: now(), from: state, to: next, event: state === "DEBUG" ? "debug_to_fix" : "step_ok", evidence: result.evidence, note: result.summary, ...(result.usage ? { usage: fmtUsage(result.usage) } : {}) });
         rec.currentState = next;
         await this.deps.ledger.writeRun(runDir, rec);
       } else {
@@ -307,6 +337,19 @@ export class LoopEngine {
 
   /** 工作态分发：IMPLEMENT 解析 tasks.md 逐任务执行；其余状态单步。 */
   async #runWorkState(runDir: string, runId: RunId, def: PathDef, state: StateId, request: string, worktree?: string, tier?: Tier): Promise<StepResult> {
+    if (state === "VERIFY") {
+      // T38/A1②：tasks.md 验收命令升格为 pinned——模型无权自选/省略/复合；含恒真式的验收命令在引擎侧剔除并落史（PLAN 产物缺陷可见）
+      const tasksPath = join(runDir, "tasks.md");
+      if (existsSync(tasksPath)) {
+        const all = extractAcceptanceCommands(readFileSync(tasksPath, "utf8"));
+        const pinned = all.filter((c) => !masksExitCode(c));
+        const dropped = all.filter((c) => masksExitCode(c));
+        if (dropped.length > 0) {
+          await this.deps.ledger.appendHistory(runDir, { ts: now(), from: "VERIFY", to: "VERIFY", event: "verify_pin_dropped", note: `验收命令含恒真式构造被剔除（tasks.md 应修正）：${dropped.join("；")}` });
+        }
+        return this.#runStep(runDir, runId, def, state, request, worktree, undefined, tier, pinned);
+      }
+    }
     if (state !== "IMPLEMENT") return this.#runStep(runDir, runId, def, state, request, worktree, undefined, tier);
     const tasksPath = join(runDir, "tasks.md");
     if (!existsSync(tasksPath)) return this.#runStep(runDir, runId, def, state, request, worktree, undefined, tier); // 无任务清单则单步（鲁棒降级）
@@ -314,18 +357,28 @@ export class LoopEngine {
     const tasks = parseUnchecked(tasksMd);
     if (tasks.length === 0) return { ok: true, summary: "任务清单已全部勾选", artifacts: ["tasks.md"], evidence: [] };
     let last: StepResult = { ok: true, summary: "", artifacts: ["tasks.md"], evidence: [] };
+    let usage: { input: number; output: number } | undefined; // T38/D6：逐任务用量聚合
     for (const t of tasks) {
       last = await this.#runStep(runDir, runId, def, state, request, worktree, `# 本任务\n${t.text}\n完成后把 tasks.md 中该任务行勾选为 [x]`, tier);
-      if (!last.ok) return last; // 失败即返回（budget 扣减/STOP 由 drive 处理）
+      if (usage && last.usage) usage = { input: usage.input + last.usage.input, output: usage.output + last.usage.output };
+      else if (last.usage) usage = { ...last.usage };
+      if (!last.ok) return usage ? { ...last, usage } : last; // 失败即返回（budget 扣减/STOP 由 drive 处理）
       tasksMd = tick(tasksMd, t.line);
       writeFileSync(tasksPath, tasksMd);
       await this.deps.ledger.appendHistory(runDir, { ts: now(), from: state, to: state, event: "task_done", note: t.text });
+      // T38/B3：任务推进即重置该态 budget——契约 6「连续失败」是同一任务连续失败；
+      // 交错场景（T1 败后恢复、T2 又败）发生在单次 #runWorkState 内，drive 层的成功重置够不到这里
+      const r2 = await this.deps.ledger.readRun(runDir);
+      if (r2.budget[state] !== undefined) {
+        delete r2.budget[state];
+        await this.deps.ledger.writeRun(runDir, r2);
+      }
     }
-    return { ok: true, summary: `完成 ${tasks.length} 个任务`, artifacts: ["tasks.md"], evidence: last.evidence };
+    return { ok: true, summary: `完成 ${tasks.length} 个任务`, artifacts: ["tasks.md"], evidence: last.evidence, ...(usage ? { usage } : {}) };
   }
 
   /** 工作态执行：含内联问答（Q&A 重试不扣 budget）。 */
-  async #runStep(runDir: string, runId: RunId, def: PathDef, state: StateId, request: string, worktree?: string, taskDirective?: string, tier?: Tier): Promise<StepResult> {
+  async #runStep(runDir: string, runId: RunId, def: PathDef, state: StateId, request: string, worktree?: string, taskDirective?: string, tier?: Tier, verifyCommands?: string[]): Promise<StepResult> {
     let rounds = 0;
     for (;;) {
       // 契约 19：会话间隙（建会话/Q&A 等待）收到的中断在此消费，不再发起下一 step
@@ -341,6 +394,9 @@ export class LoopEngine {
         preamble: this.deps.resources.preamble(),
         workingDir: def.needsWorktree && worktree ? worktree : this.deps.projectRoot,
         role: this.#roleFor(state),
+        // T38/A2：自报产物解析根——运行目录（design.md 等文档）与工作目录（IMPLEMENT 代码文件）皆合法
+        artifactRoots: [runDir, def.needsWorktree && worktree ? worktree : this.deps.projectRoot],
+        ...(verifyCommands?.length ? { verifyCommands } : {}),
       };
       const result = await this.deps.runner.run(spec, (e: StepEvent) => {
         if (e.type === "question") questions.push(e.text);
@@ -348,7 +404,7 @@ export class LoopEngine {
         else if (e.type === "thinking") this.deps.emit({ type: "step_thinking", runId, delta: e.delta });
         else if (e.type === "tool") this.deps.emit({ type: "step_tool", runId, name: e.name, detail: e.detail });
       });
-      this.deps.emit({ type: "step_finished", runId, state, ok: result.ok, ...(result.aborted ? { aborted: true } : { summary: result.summary, ...(result.artifacts.length > 0 ? { artifacts: result.artifacts } : {}) }) });
+      this.deps.emit({ type: "step_finished", runId, state, ok: result.ok, ...(result.aborted ? { aborted: true } : { summary: result.summary, ...(result.artifacts.length > 0 ? { artifacts: result.artifacts } : {}), ...(result.usage ? { usage: result.usage } : {}) }) });
       if (!result.ok || questions.length === 0 || ++rounds >= QA_MAX_ROUNDS) return result;
       for (const q of questions) {
         this.deps.emit({ type: "agent_question", runId, text: q });
@@ -387,17 +443,28 @@ export class LoopEngine {
     const qa = this.qa.get(runId) ?? "";
     const parent = this.parentCtx.get(runId);
     const recent = await this.deps.ledger.recentConversation(this.deps.projectRoot, 5); // 契约 24/E：滚动背景（最近 5 条）
-    const followupHint =
-      def?.id === "research" && parent
-        ? "先读前轮 conclusion.md，在其基础上修订/追加（演进），不要从零重写"
-        : (def?.id === "feature" || def?.id === "prd") && parent
-          ? "前轮结论/产物可直接作为本轮输入（如调研结论作为设计输入）"
-          : "";
+    let followupHint = "";
+    if (parent) {
+      if (def?.id === "research") followupHint = "先读前轮 conclusion.md，在其基础上修订/追加（演进），不要从零重写";
+      else if (def?.id === "feature" || def?.id === "prd") followupHint = "前轮结论/产物可直接作为本轮输入（如调研结论作为设计输入）";
+    }
+    // T38/A1②：VERIFY 固定验收命令（与 #runWorkState 同源解析）——指令面告知模型必须逐条执行
+    let verifyPinned = "";
+    if (state === "VERIFY") {
+      const tasksPath = join(runDir, "tasks.md");
+      if (existsSync(tasksPath)) {
+        const pinned = extractAcceptanceCommands(readFileSync(tasksPath, "utf8")).filter((c) => !masksExitCode(c));
+        if (pinned.length > 0) {
+          verifyPinned = ["# 固定验收命令（机器强制：无权自选/省略/替换，逐条真实执行并记录）", ...pinned.map((c) => `- ${c}`), "命令含 || / ; / | / $( 等恒真式构造会被机器拒绝；每条验收命令真实 exit code 必须为 0。"].join("\n");
+        }
+      }
+    }
     return [
       `# 状态任务：${STATE_INSTRUCTIONS[state] ?? state}`,
       `# 需求：${request}`,
       `# 运行目录: ${runDir}`,
       qa ? `# 已有问答上下文\n${qa}` : "",
+      verifyPinned,
       parent ? `# 前轮上下文（承接 run，契约 24）\n前轮需求：${parent.request}\n前轮产物目录：${parent.runDir}——先读再动手${followupHint ? `；${followupHint}` : ""}` : "",
       recent.length ? `# 近期会话背景（滚动摘要，参考）\n${recent.join("\n")}` : "",
       steering ? `# 用户新指示（steering）\n${steering}` : "",
@@ -411,4 +478,10 @@ export class LoopEngine {
       .filter(Boolean)
       .join("\n\n");
   }
+}
+
+/** T38/D6：用量人读格式（phase-history 与步末摘要共用）：in 12.3k/out 1.2k tok */
+export function fmtUsage(u: { input: number; output: number }): string {
+  const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+  return `in ${k(u.input)}/out ${k(u.output)} tok`;
 }

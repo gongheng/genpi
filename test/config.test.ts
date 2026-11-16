@@ -53,6 +53,20 @@ describe("config", () => {
     expect(cfg.models.implementer).toBe("anthropic/claude-sonnet-4-5");
   });
 
+  it("③b T38 worktreeSetup 与 models.router：三级合并（项目覆盖用户；缺省 undefined）", () => {
+    const home = mkd();
+    const project = mkd();
+    mkdirSync(join(home, ".genpi"), { recursive: true });
+    writeFileSync(join(home, ".genpi", "settings.json"), JSON.stringify({ worktreeSetup: "npm ci", models: { router: "openai/gpt-5-mini" } }));
+    mkdirSync(join(project, ".genpi"), { recursive: true });
+    writeFileSync(join(project, ".genpi", "config.json"), JSON.stringify({ worktreeSetup: "pnpm install --frozen-lockfile" }));
+    const cfg = resolveConfig(project, join(home, ".genpi"));
+    expect(cfg.worktreeSetup).toBe("pnpm install --frozen-lockfile"); // 项目覆盖用户
+    expect(cfg.models.router).toBe("openai/gpt-5-mini"); // 用户级模型角色未被项目 models 覆盖时保留
+    const bare = resolveConfig(mkd(), join(mkd(), ".genpi"));
+    expect(bare.worktreeSetup).toBeUndefined(); // 缺省不执行引导
+  });
+
   it("④ applyDataRoot 设 PI_CODING_AGENT_DIR 并返回路径", () => {
     const home = mkd();
     const agentDir = applyDataRoot(home);

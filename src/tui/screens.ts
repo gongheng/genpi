@@ -60,7 +60,7 @@ export function formatHistoryLines(rawLines: string[], n = 15): string {
   const entries = rawLines
     .flatMap((l) => {
       try {
-        return [JSON.parse(l) as { ts?: string; from?: string; to?: string; event?: string; note?: string; budgetLeft?: number }];
+        return [JSON.parse(l) as { ts?: string; from?: string; to?: string; event?: string; note?: string; budgetLeft?: number; usage?: string }];
       } catch {
         return [];
       }
@@ -71,8 +71,9 @@ export function formatHistoryLines(rawLines: string[], n = 15): string {
     .map((e) => {
       const t = (e.ts ?? "").slice(11, 19) || "??:??:??";
       const budget = typeof e.budgetLeft === "number" ? ` budget=${e.budgetLeft}` : "";
+      const usage = e.usage ? ` ${e.usage}` : ""; // T38/D6：步成功事件携带用量
       const note = e.note ? ` · ${String(e.note).slice(0, 60)}` : "";
-      return `${t} ${e.from ?? "?"}→${e.to ?? "?"} ${e.event ?? "?"}${budget}${note}`;
+      return `${t} ${e.from ?? "?"}→${e.to ?? "?"} ${e.event ?? "?"}${budget}${usage}${note}`;
     })
     .join("\n");
 }
@@ -85,14 +86,15 @@ export function cutBoundary(text: string, max: number): string {
   return b >= Math.floor(max * 0.5) ? head.slice(0, b + 1) : head.slice(0, max);
 }
 
-/** 步末一行摘要（聊天流）：✓/✗ 状态 · summary 首行边界截断 · 落盘产物指路（T26/T34，叙事不归档）。 */
-export function fmtStepDigest(state: string, ok: boolean, summary?: string, artifacts?: string[]): string {
+/** 步末一行摘要（聊天流）：✓/✗ 状态 · summary 首行边界截断 · 落盘产物指路 · token 用量（T26/T34/T38-D6，叙事不归档）。 */
+export function fmtStepDigest(state: string, ok: boolean, summary?: string, artifacts?: string[], usage?: { input: number; output: number }): string {
   const head = `${ok ? "✓" : "✗"} ${state}`;
   const first = (summary ?? "").split("\n").map((l) => l.trim()).find(Boolean);
   const gist = first ? cutBoundary(first, 40) : "";
   const ell = first && first.length > 40 ? "…" : "";
   const files = artifacts && artifacts.length > 0 ? `（→ ${(artifacts.length > 2 ? artifacts.slice(0, 2).concat(["…"]) : artifacts).join("、")}）` : "";
-  return `${head}${gist ? ` · ${gist}${ell}` : ""}${files}`;
+  const tok = usage ? ` · in ${(usage.input / 1000).toFixed(1)}k/out ${(usage.output / 1000).toFixed(1)}k tok` : "";
+  return `${head}${gist ? ` · ${gist}${ell}` : ""}${files}${tok}`;
 }
 
 // ---------- 步骤实时视图（编辑器上方小部件：思考 / 工具 / 文本尾部） ----------

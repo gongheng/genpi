@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { composePrompt, createPiStepRunner, crossCheckEvidence, extractQuestions, parseResult, setSessionFactoryForTest, toolDetail, type SessionLike } from "../src/agent/step-runner";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { checkArtifacts, composePrompt, createPiStepRunner, crossCheckEvidence, extractQuestions, masksExitCode, parseResult, setSessionFactoryForTest, toolDetail, type SessionLike } from "../src/agent/step-runner";
 import type { CommandEvidence, StepSpec } from "../src/types";
 
 function fakeSession(finalText: string, opts: { deltas?: string[]; id?: string; streamEvents?: { type: string; delta?: string; toolCall?: { name?: string; arguments?: unknown } }[]; toolEvents?: unknown[] } = {}): SessionLike {
@@ -174,6 +177,76 @@ describe("step-runner", () => {
       expect(result.summary).toContain("证据与真实执行不符");
     } finally {
       setSessionFactoryForTest(null);
+    }
+  });
+
+  it("⑩ T38/A1① masksExitCode：恒真式构造识别（拒绝掩错复合，放行不掩错构造）", () => {
+    const deny = ["npm test || true", "npm test; echo ok", "npm test | tee log", "echo $(date)", "echo `date`", "! npm test", "npm test &", "npm test\nnpm test2"];
+    for (const c of deny) expect(masksExitCode(c), c).toBe(true);
+    const allow = ["npm test", "npm test && echo ok", "npm test 2>&1", "npm test > log.txt", "cd sub && npm test", "npm test -- --filter=a"];
+    for (const c of allow) expect(masksExitCode(c), c).toBe(false);
+  });
+
+  it("⑪ T38/A1① VERIFY 自报复合命令拒绝：`npm test || true` 骗不过交叉校验；非验证态放行", () => {
+    const claimed: CommandEvidence[] = [{ command: "npm test || true", exitCode: 0, outputTail: "" }];
+    const real: CommandEvidence[] = [{ command: "npm test || true", exitCode: 0, outputTail: "" }];
+    const v = crossCheckEvidence(claimed, real, "VERIFY");
+    expect(v.ok).toBe(false);
+    expect(v.note).toContain("恒真式");
+    expect(crossCheckEvidence(claimed, real, "DESIGN").ok).toBe(true); // 非验证态证据仅参考
+  });
+
+  it("⑫ T38/A1② pinned 验收命令覆盖强制：未执行/未通过/齐全三种情形", () => {
+    const pinned = ["node test.js"];
+    // 未真实执行 → fail
+    expect(crossCheckEvidence([], [], "VERIFY", pinned).ok).toBe(false);
+    // 真实执行但 exit 1 → fail（未通过）
+    const failed = crossCheckEvidence([{ command: "node test.js", exitCode: 1, outputTail: "" }], [{ command: "node test.js", exitCode: 1, outputTail: "" }], "VERIFY", pinned);
+    expect(failed.ok).toBe(false);
+    expect(failed.note).toContain("未通过");
+    // 齐全且 exit 0 → pass
+    const good = crossCheckEvidence([{ command: "node test.js", exitCode: 0, outputTail: "" }], [{ command: "node test.js", exitCode: 0, outputTail: "" }], "VERIFY", pinned);
+    expect(good.ok).toBe(true);
+  });
+
+  it("⑬ T38/A2 checkArtifacts：自报产物在解析根下存在才放行（绝对/相对路径）", () => {
+    const root = join(tmpdir(), `genpi-t38-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(join(root, "run"), { recursive: true });
+    writeFileSync(join(root, "run", "design.md"), "# 设计");
+    try {
+      expect(checkArtifacts(["design.md"], [join(root, "run")]).ok).toBe(true);
+      expect(checkArtifacts(["missing.md"], [join(root, "run")]).ok).toBe(false);
+      expect(checkArtifacts([join(root, "run", "design.md")], []).ok).toBe(true); // 绝对路径直接查
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("⑭ T38 集成：自报产物不存在 → step fail；存在 → pass 且携带 usage（D6 聚合）", async () => {
+    const root = join(tmpdir(), `genpi-t38b-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(join(root, "run"), { recursive: true });
+    const yaml = "```yaml\nok: true\nsummary: 完成\nartifacts:\n  - design.md\nevidence: []\n```";
+    const usageEvents = [
+      { type: "message_end", message: { role: "assistant", usage: { input: 1000, output: 200 } } },
+      { type: "message_end", message: { role: "assistant", usage: { input: 500, output: 100 } } },
+    ];
+    try {
+      const missing = fakeSession(yaml, { toolEvents: usageEvents });
+      setSessionFactoryForTest(async () => missing);
+      let result = await createPiStepRunner().run({ ...spec, artifactRoots: [join(root, "run")] }, () => {});
+      expect(result.ok).toBe(false);
+      expect(result.summary).toContain("自报产物不存在");
+      expect(result.usage).toEqual({ input: 1500, output: 300 }); // 校验失败也聚合用量（失败重跑也是成本）
+
+      writeFileSync(join(root, "run", "design.md"), "# 设计");
+      const present = fakeSession(yaml, { toolEvents: usageEvents });
+      setSessionFactoryForTest(async () => present);
+      result = await createPiStepRunner().run({ ...spec, artifactRoots: [join(root, "run")] }, () => {});
+      expect(result.ok).toBe(true);
+      expect(result.usage).toEqual({ input: 1500, output: 300 });
+    } finally {
+      setSessionFactoryForTest(null);
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

@@ -8,7 +8,10 @@ export interface ResolvedConfig {
   branchPrefix: string;
   worktreeDir: string;
   budget: number;
-  models: Partial<Record<"implementer" | "reviewer", string>>;
+  /** 模型角色（契约 16）：implementer/reviewer 按状态生效；router 供路由分类（T38/F8，小快模型降延迟与成本） */
+  models: Partial<Record<"implementer" | "reviewer" | "router", string>>;
+  /** T38/C4：worktree 新建后执行的依赖引导命令（如 "npm ci"）；缺省不执行 */
+  worktreeSetup?: string;
 }
 
 /** 设定 pi 数据根为 <home>/.genpi（经官方 PI_CODING_AGENT_DIR），返回 agentDir。 */
@@ -47,6 +50,7 @@ export function resolveConfig(projectRoot: string, agentDir: string): ResolvedCo
     worktreeDir: merged.worktreeDir ?? defaults.worktreeDir,
     budget: typeof merged.budget === "number" ? merged.budget : defaults.budget,
     models: { ...(user.models as object), ...(project.models as object) } as ResolvedConfig["models"],
+    ...(typeof merged.worktreeSetup === "string" && merged.worktreeSetup.trim() ? { worktreeSetup: merged.worktreeSetup.trim() } : {}),
   };
 }
 

@@ -32,6 +32,10 @@ export interface StepSpec {
   workingDir: string;
   /** 模型角色（契约 16）：IMPLEMENT/FIX→implementer，REVIEW→reviewer，缺省全局默认 */
   role?: "implementer" | "reviewer";
+  /** 自报产物的合法解析根（T38/A2）：引擎给定（运行目录/工作目录），StepRunner 逐个 existsSync，缺失即 step fail */
+  artifactRoots?: string[];
+  /** 固定验收命令（T38/A1②，仅 VERIFY）：来自 tasks.md 验收行，模型无权自选/省略/复合；每条必须真实执行且 exit 0 */
+  verifyCommands?: string[];
 }
 
 export interface StepResult {
@@ -41,6 +45,8 @@ export interface StepResult {
   summary: string;
   artifacts: string[];
   evidence: CommandEvidence[];
+  /** 本步 token 用量（T38/D6）：StepRunner 从 message_end 聚合，引擎落 phase-history */
+  usage?: { input: number; output: number };
 }
 
 export type StepEvent =
@@ -63,7 +69,7 @@ export type EngineEvent =
   | { type: "step_thinking"; runId: RunId; delta: string }
   | { type: "step_tool"; runId: RunId; name: string; detail: string }
   | { type: "agent_question"; runId: RunId; text: string }
-  | { type: "step_finished"; runId: RunId; state: StateId; ok: boolean; /** 步末摘要（T26 聊天流一行化）；aborted 步无摘要由 run_stopped 报 */ summary?: string; aborted?: boolean; /** 本步落盘产物（T34：聊天摘要指路用） */ artifacts?: string[] }
+  | { type: "step_finished"; runId: RunId; state: StateId; ok: boolean; /** 步末摘要（T26 聊天流一行化）；aborted 步无摘要由 run_stopped 报 */ summary?: string; aborted?: boolean; /** 本步落盘产物（T34：聊天摘要指路用） */ artifacts?: string[]; /** 本步 token 用量（T38/D6） */ usage?: { input: number; output: number } }
   | { type: "gate_opened"; runId: RunId; gate: StateId; artifactPath: string; /** 门禁审批对象预览（GATE_MR 为变更摘要；文件型门禁缺省由 TUI 读文件） */ preview?: string }
   | { type: "gate_resolved"; runId: RunId; gate: StateId; decision: GateDecision }
   | { type: "budget_changed"; runId: RunId; state: StateId; remaining: number }

@@ -1,7 +1,7 @@
 # genpi · design.md
 
 - 状态：**已批准**（用户书面批准，HARD-GATE 通过）
-- 版本：v1.9（2026-10-31 修订九：风险分级 T0-T2 + CLARIFY 豁免 + prd 路径；修订八：stopped 可续跑与中断标志防泄漏。修订七：恢复改为用户主导——打开只提示不自动复活；「继续」续跑；新需求自动搁置旧循环；/new 天然新鲜。v1.6：证据机器校验等；v1.5：research 去门禁；v1.4：门禁去模态化；v1.3：契约 19；v1.2：扩展独立管理；v1.1：TUI 嵌入 InteractiveMode）
+- 版本：v1.10（2026-11-16 修订十：T38 证据强制补全——验收命令恒真式审计+pinned 固定、自报产物存在性校验、budget 连续失败语义对齐、worktree 依赖引导与清理、token 用量记账、resume 重建承接上下文、路由模型角色。修订九：风险分级 T0-T2 + CLARIFY 豁免 + prd 路径；修订八：stopped 可续跑与中断标志防泄漏。修订七：恢复改为用户主导——打开只提示不自动复活；「继续」续跑；新需求自动搁置旧循环；/new 天然新鲜。v1.6：证据机器校验等；v1.5：research 去门禁；v1.4：门禁去模态化；v1.3：契约 19；v1.2：扩展独立管理；v1.1：TUI 嵌入 InteractiveMode）
 - 形态：**独立仓库**（单独 git 维护、单独开源，`npm i -g genpi` 即用）；fork（gongheng/pi）仅作上游只读镜像，不承载产品代码
 - 对 pi 的依赖面：仅 `@earendil-works/pi-coding-agent`（SDK，含 InteractiveMode 与扩展 API），以 npm 发布版消费，升级=改版本号；调试 pi 内部时 MAY 临时 `file:` 链接本地 fork，用完拆除
 
@@ -209,9 +209,10 @@ export interface StepResult {
 1. genpi SHALL 在启动目录（业务项目根）运行循环，MUST NOT 要求项目内存在任何 gen/genpi 技能或配置文件。
 2. genpi MUST 将全部循环产物写入 `<项目根>/.genpi/runs/<runId>/`；MUST NOT 写循环范围外的任何路径（worktree 内与 `.genpi/` 除外）。
 3. 引擎 MUST 在 GATE 态暂停并等待显式 `decide()`；MUST NOT 由模型输出自我放行。
-4. VERIFY MUST 以命令 exit code 为完成证据；证据 MUST 与会话内真实 bash 执行记录（tool_execution_* 事件）交叉校验：自报与真实 exitCode 不符即 fail（伪造证据）；VERIFY 态自报命令无真实执行对应即 fail（无法机器复核）；非验证态无对应则放行。无机器可复核的证据 MUST NOT 宣告完成（两阶段 done：agent 宣称 → 机器验证）。
+4. VERIFY MUST 以命令 exit code 为完成证据；证据 MUST 与会话内真实 bash 执行记录（tool_execution_* 事件）交叉校验：自报与真实 exitCode 不符即 fail（伪造证据）；VERIFY 态自报命令无真实执行对应即 fail（无法机器复核）；非验证态无对应则放行。无机器可复核的证据 MUST NOT 宣告完成（两阶段 done：agent 宣称 → 机器验证）。【v1.10 补强】VERIFY 自报命令含恒真式构造（`||`/`;`/`|`/`$(`/反引号/行首 `!`/末尾单 `&`）SHALL fail——复合命令抹掉真实退出码，交叉校验不能被骗过；tasks.md 验收行 SHALL 升格为 pinned 固定验收命令（引擎注入 spec.verifyCommands，含恒真式的剔除并落史）：每条 MUST 被自报且真实执行 exit 0，模型无权自选/省略/替换。
+4a. 自报产物存在性（v1.10）：StepResult.artifacts 声明的每个产物 MUST 在解析根（运行目录/工作目录/绝对路径）下真实存在，缺失即 step fail——两阶段 done 覆盖产物侧，未落盘的产物进不了门禁。
 5. feature/bugfix MUST 在独立 git worktree 分支上实施；MUST NOT 修改主工作树。
-6. fail budget 默认每步 3 次；耗尽 MUST 进入 STOP 态转人工，MUST NOT 自动无限重试。
+6. fail budget 默认每步 3 次；耗尽 MUST 进入 STOP 态转人工，MUST NOT 自动无限重试。【v1.10 语义澄清】「每步 N 次」= 同一任务/同一诊断序列的**连续**失败：任务推进（task_done）或状态成功即重置该态计数；VERIFY 例外——fail budget 为诊断循环（VERIFY→DEBUG→修复→再验证）累计封顶（契约 23），成功即离态不重置。
 7. 进程中断后 `--resume` SHALL 从台账文件恢复（不信对话记忆）；恢复后状态与 budget MUST 与台账一致。
 8. genpi MUST NOT 修改项目 `.gitignore` 或 git 配置。
 9. genpi MUST 将凭证、模型/provider 设置、项目信任与会话转录独立维护于 `~/.genpi/`（经 `PI_CODING_AGENT_DIR` 重定向），MUST NOT 读写 `~/.pi/`；SHOULD 提供首次运行配置引导；MAY 提供从 `~/.pi` 的一次性导入。
@@ -221,7 +222,7 @@ export interface StepResult {
 13. Run 屏任意时刻的用户新输入 SHOULD 作为当前 step 的 steering 注入；MUST NOT 引发状态跳跃或扣减 budget。
 14. MR 创建失败 MUST NOT 判定 run 失败，SHALL 降级为 push + compare URL 转人工。
 15. 同一项目 SHALL 同时最多一个活跃 run；显式并发 `start` MUST 拒绝并列出活跃 run。打开 genpi 检测到未完成循环时 SHALL 仅提示（不自动恢复，`/new` 换会话同样干净）；回「继续」SHALL 续跑；输入新需求 SHALL 自动搁置旧循环（status=stopped，台账保留）后启动新循环——入口 MUST NOT 以「单活跃」为由阻塞。
-16. `.genpi/config.json` MAY 按 step 角色指定模型（如 implementer/reviewer）；缺省继承 `~/.genpi/settings.json` 全局设置。
+16. `.genpi/config.json` MAY 按 step 角色指定模型（如 implementer/reviewer）；缺省继承 `~/.genpi/settings.json` 全局设置。【v1.10】models.router 角色供路由分类（小快模型降延迟与成本，解析失败回落全局默认）；worktreeSetup 字段指定 worktree 新建后执行的依赖引导命令（如 "npm ci"，仅新建执行、失败告警不阻塞）。`genpi clean [--force]` 清理终态 run 的 worktree/分支（干跑列示，台账永久保留）。
 17. genpi 扩展独立管理：初始零扩展——MUST NOT 继承 `~/.pi` 或复制 settings.json 带来的 `packages`/`extensions` 配置；首次启动 SHALL 一次性剥离并备份（含已装目录，可回滚）；`-builtin:*` 禁用指令是用户偏好而非扩展装载，SHALL 保留。扩展仅经 `genpi ext install`（复用 pi PackageManager，装于 `~/.genpi`）显式安装，`genpi ext uninstall/list` 对应卸载与查看；内联 extensionFactories 保留为编程注入 seam（genpi 编排桥即基于此），非用户扩展入口。
 18. genpi TUI SHALL 直接复用 pi 公开的 `InteractiveMode`（SDK 包根导出）而非自绘界面；genpi 以 pi 扩展机制接入：`input` 事件 `{action:"handled"}` 接管用户输入分流（v1.9 起 T27 增 chat 出口：路由判定为闲聊/问候/与开发工作无关的对话时 SHALL 放行 `{action:"continue"}`，pi 原生会话直接回答——不建 run、不落产物、不搁置在跑循环；启发式仅整句精确匹配放行，语义判断交路由模型，存疑 SHALL 就工作不闲聊），进度经 `sendMessage`/`setWidget`/`setStatus` 呈现；headless LoopEngine 与契约 1-17 MUST NOT 因此改变。门禁 SHALL 为聊天命令驱动（`a`/`c <意见>`/`r`/`p` 预览），MUST NOT 使用模态选择框（防误触）；产物正文 MUST NOT 默认上屏，预览按需拉取；未决引擎不推进的强制力在引擎，不依赖弹窗。
 19. 中断与废弃：step 流式进行时 `escape` SHALL 中断当前步骤（StepResult.aborted，不扣 budget，run 转 stopped 可 resume）；会话间隙（建会话/Q&A 等待）收到的中断 SHALL 经 pendingAbort 在下一 step 前生效，MUST NOT 多发起一次模型调用；`/genpi-stop` SHALL 废弃当前 run（台账保留，currentRunId 丢失时 SHALL 回退台账活跃 run）；GATE 期废弃同样 SHALL 落 stopped。用户中断 MUST NOT 与失败同语义（不烧预算、不重试）。
@@ -229,7 +230,8 @@ export interface StepResult {
 21. CLARIFY 豁免（v1.9）：路由判定需求证据完整（请求已含验收标准/复现命令/明确规格，或用户明确表示无需澄清）时 SHALL 跳过 CLARIFY 直入 DESIGN，豁免理由 MUST 记入 phase-history（event: clarify_waived）；未判豁免 SHALL 默认进入 CLARIFY（行为与 v1.8 一致）；豁免不影响 budget。
 22. prd 路径（v1.9）：仅读不改代码，SHALL 产出 prd.md（背景/用户故事/验收标准/非目标）；GATE_PRD SHALL 人工批准后交付（approve→DONE / request_changes→PRD 携注 / reject 终止）；无 worktree、无 MR；无 git 目录 SHALL 同样可运行。
 23. 验证失败诊断循环（T28b）：feature/bugfix 的 VERIFY 失败 MUST NOT 原地盲重试——SHALL 转 DEBUG 诊断态（重跑失败命令、定位根因、把最小修复方案写入运行目录 diagnosis-latest.md）；诊断成功 SHALL 回修复态（PathDef.debugTo：feature=IMPLEMENT、bugfix=FIX）且修复态指令 MUST 自动注入诊断引用（存在即注入，修复完成后 agent SHALL 删除该文件）；VERIFY fail budget（契约 6）SHALL 仍为诊断循环封顶，DEBUG 自身 budget 耗尽 SHALL STOP 转人工。
-24. 上下文连续性（T24）：跨 run 协作 SHALL 双轨——**E 滚动摘要**：每个 run 到达终态（done/stopped/rejected）SHALL 向 `<项目根>/.genpi/conversation.md` 追加一行摘要（runId/路径/状态/需求前 40 字/末步摘要前 60 字），新 run 的每步指令 SHALL 注入最近 5 条作背景（缺失降级为无注入，MUST NOT 崩溃）；**A 前轮承接**：路由在调用方提供上轮上下文时 SHALL 判定 followUp（模型为主，指代词兜底：有上轮+指代命中才承接，无上轮永不承接），判承接的新 run SHALL 落 parentRunId 并在指令注入前轮需求与产物目录（先读再动手）；research 承接 research SHALL 注入「修订/追加而非重写」续写语义，feature/prd 承接 SHALL 注入「前轮结论可作输入」；前轮已删除 SHALL 静默降级。承接关系与滚动摘要均为台账文件（compaction-resistant，与契约 7 同源）。
+24. 上下文连续性（T24）：跨 run 协作 SHALL 双轨——**E 滚动摘要**：每个 run 到达终态（done/stopped/rejected）SHALL 向 `<项目根>/.genpi/conversation.md` 追加一行摘要（runId/路径/状态/需求前 40 字/末步摘要前 60 字），新 run 的每步指令 SHALL 注入最近 5 条作背景（缺失降级为无注入，MUST NOT 崩溃）；**A 前轮承接**：路由在调用方提供上轮上下文时 SHALL 判定 followUp（模型为主，指代词兜底：有上轮+指代命中才承接，无上轮永不承接），判承接的新 run SHALL 落 parentRunId 并在指令注入前轮需求与产物目录（先读再动手）；research 承接 research SHALL 注入「修订/追加而非重写」续写语义，feature/prd 承接 SHALL 注入「前轮结论可作输入」；前轮已删除 SHALL 静默降级。承接关系与滚动摘要均为台账文件（compaction-resistant，与契约 7 同源）。【v1.10】resume SHALL 从 run.parentRunId 重建承接上下文（不信进程内存——重启不降级）。
+24a. 用量记账（v1.10）：StepRunner SHALL 从会话 message_end 聚合每步 token 用量，step_finished 事件与 phase-history（step_ok）SHALL 携带；步末摘要与 /genpi log SHOULD 可见。
 
 ### 3.2 场景表
 

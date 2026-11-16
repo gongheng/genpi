@@ -543,6 +543,28 @@ export function describeMigration(m): string;                                   
 
 **验证（PTY 端到端）**：❓ 后输入答案 → 回显即时出现、RUN#2 7ms 内收到且「已有问答上下文」注入 Q/A → 二轮完成 → GATE_PRD 正常开闸 → r 终止 ✔。91 用例全绿，tsc 零错。（SDK 1.4.0 上验证；1.5.2 升级后重验：91 用例全绿、DTS 通过、build 重建）
 
+## T38 — 证据强制补全与工程化八项（自检自审驱动，A1-F8）
+
+**背景**：升级 SDK 1.5.2 后对全仓自检，发现核心卖点「机器强制」存在真实漏洞与工程断层，按价值排序一次补齐。
+
+**A1 验收命令强制（契约 4 补强）**：①`masksExitCode` 纯函数——VERIFY 自报命令含 `||`/`;`/`|`/`$(`/反引号/行首 `!`/末尾单 `&`/换行即 fail（`npm test || true` 骗过交叉校验的洞；`&&`/重定向/`2>&1` 不掩错放行）；②tasks.md 验收行（extractAcceptanceCommands，含已勾选任务——验证是全量回归）升格为 pinned：引擎传入 spec.verifyCommands，指令声明「无权自选/省略/替换」，crossCheck 强制每条真实执行且 exit 0；含恒真式的验收命令在引擎侧剔除并落史（verify_pin_dropped，PLAN 产物缺陷可见）。
+
+**A2 产物存在性校验**：StepSpec.artifactRoots（引擎给定 [运行目录, 工作目录]），PiStepRunner 对自报 artifacts 逐个 existsSync（绝对路径直接查），缺失即 step fail——两阶段 done 补齐产物侧，`ok: true, artifacts: [design.md]` 不写文件进不了门禁。
+
+**B3 budget 连续失败语义（契约 6 对齐）**：旧实现 per-state 终身累计，IMPLEMENT 8 任务跨任务掉 3 次即 STOP 但消息自称「连续失败」。修：drive 层 state 成功即 delete budget[state]（VERIFY 例外——累计恰是契约 23 诊断循环封顶）；#runWorkState 层任务推进（task_done）即重置（交错发生在单次调用内，drive 层够不到）。
+
+**C4 worktree 依赖引导**：新 worktree 无 gitignored 依赖，首次 VERIFY 必白烧一轮 budget+DEBUG 才发现「依赖没装」。config.worktreeSetup（如 "npm ci"），ensureWorktree 返回 created 标志，仅新建后执行（复用不重复）；失败告警不阻塞（worktree_setup 落史）。
+
+**C5 worktree 清理**：`genpi clean`（干跑列示终态 run 的 worktree/分支，`--force` 执行：remove→--force 兜底→branch -D→prune，单条失败不阻断；台账 .genpi/runs 永久保留）；GATE_MR 推送成功后历史附「可 genpi clean 清理」提示。
+
+**D6 用量记账**：PiStepRunner 从 message_end（assistant.usage）聚合 in/out token → StepResult.usage → step_finished 事件携带 + step_ok 落 phase-history（fmtUsage：in 12.3k/out 1.2k tok）→ 步末摘要与 /genpi log 可见；IMPLEMENT 逐任务用量累加。
+
+**E7 resume 重建承接上下文**：parentCtx 原为内存 Map，进程重启后丢——resume() 从 rec.parentRunId 合账重建（台账唯一真相原则贯彻到契约 24/A）。
+
+**F8 路由模型角色**：models.router（config 三级合并），classifyWithModel/routeRequest 穿插，resolveCliModelSafe 复用 StepRunner 的 ModelRuntime 缓存解析 "prov/model-id"，失败回落全局默认。
+
+**验证**：105 用例全绿（91→105，+14：masksExitCode 拒绝/放行清单、pinned 三情形、checkArtifacts 存在性、集成用量聚合与产物校验、budget 交错重置、setup 一次性、resume 重建、pinned 接线、用量落史、planCleanup/executeCleanup、config 合并、routerModel 穿插）；tsc 零错；DTS 构建通过；check:resources 通过。
+
 ## T14 — 门禁去模态化（防误触 + 产物正文不默认上屏）
 
 **背景**：用户验收反馈两点——①门禁消息把产物正文大量刷屏；②阶段完成后弹出批准/要求修改/终止选择框容易误触。

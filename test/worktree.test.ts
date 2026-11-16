@@ -2,7 +2,7 @@ import { mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createGitOps, createShellExec, normalizeCompareUrl } from "../src/engine/worktree";
+import { createGitOps, createShellExec, executeCleanup, normalizeCompareUrl, planCleanup, type ExecFn } from "../src/engine/worktree";
 
 const dirs: string[] = [];
 function mkd(prefix: string): string {
@@ -114,5 +114,39 @@ describe("worktree + MR", () => {
     expect(normalizeCompareUrl("https://gitee.com/bob/app.git", "feature/y")).toBe(
       "https://gitee.com/bob/app/compare/feature/y?expand=1",
     );
+  });
+
+  it("⑤ T38/C5 planCleanup：终态且有 worktree 才入列；分支名 = 前缀+runId；dirExists 注入探测", () => {
+    const runs = [
+      { id: "20260101-1000-feature-a", status: "done", worktree: "/w/a" },
+      { id: "20260101-1100-feature-b", status: "rejected", worktree: "/w/b" },
+      { id: "20260101-1200-feature-c", status: "stopped", worktree: "/w/c" },
+      { id: "20260101-1300-feature-d", status: "active", worktree: "/w/d" }, // 活跃不清
+      { id: "20260101-1400-research-e", status: "done" }, // 无 worktree
+    ];
+    const plan = planCleanup(runs, { worktreeDir: ".worktrees/", branchPrefix: "feature/", existsCheck: (p) => p !== "/w/b" });
+    expect(plan.map((e) => e.runId)).toEqual(["20260101-1000-feature-a", "20260101-1100-feature-b", "20260101-1200-feature-c"]);
+    expect(plan[0]?.branch).toBe("feature/20260101-1000-feature-a");
+    expect(plan[0]?.dirExists).toBe(true);
+    expect(plan[1]?.dirExists).toBe(false); // 目录已不存在→仅删分支
+  });
+
+  it("⑥ T38/C5 executeCleanup：remove→branch -D→prune；失败降级 --force；单条失败不阻断", async () => {
+    const cmds: string[] = [];
+    const exec: ExecFn = async (_cwd, cmd) => {
+      cmds.push(cmd);
+      if (cmd.includes('worktree remove "/w/a"')) return { code: 1, out: "dirty" }; // 首次 remove 失败→--force
+      if (cmd.includes('branch -D "/w/x-br"')) return { code: 1, out: "no branch" }; // 分支删除失败
+      return { code: 0, out: "" };
+    };
+    const results = await executeCleanup(exec, "/proj", [
+      { runId: "a", status: "done", worktree: "/w/a", branch: "feature/a", dirExists: true },
+      { runId: "x", status: "done", worktree: "/w/x", branch: "/w/x-br", dirExists: false },
+    ]);
+    expect(cmds.some((c) => c.includes("worktree remove --force"))).toBe(true);
+    expect(cmds.some((c) => c.includes("git worktree prune"))).toBe(true);
+    expect(results[0]?.ok).toBe(true); // force 兜底成功
+    expect(results[0]?.note).toContain("含未提交变更");
+    expect(results[1]?.ok).toBe(false); // 分支删除失败不阻断其余
   });
 });

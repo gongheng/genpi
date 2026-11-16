@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { applyDataRoot, hasCredentials, resolveConfig } from "../src/config";
 import { VERSION, runDemoMode, runTui } from "../src/tui/app";
 import { createExtManager, describeMigration, migrateInheritedPiConfig, resolveUninstallSource, sourceName } from "../src/ext-manager";
+import { createFsLedger } from "../src/engine/ledger";
+import { createShellExec, executeCleanup, planCleanup } from "../src/engine/worktree";
 
 export async function main(argv: string[]): Promise<number> {
   if (argv.includes("--version")) {
@@ -27,6 +29,10 @@ export async function main(argv: string[]): Promise<number> {
     const migrated = migrateInheritedPiConfig(agentDir);
     if (migrated) console.log(describeMigration(migrated));
     return extCli(extArgs, { projectRoot, agentDir });
+  }
+  if (argv[0] === "clean") {
+    // T38/C5：worktree/分支清理（干跑列示，--force 执行）；台账 .genpi/runs 永久保留（审计）；不依赖模型凭证
+    return cleanCli(argv.slice(1), projectRoot);
   }
   if (!hasCredentials(agentDir)) {
     console.log("genpi 首次使用：数据根在 " + agentDir);
@@ -107,6 +113,42 @@ async function extCli(argv: string[], ctx: { projectRoot: string; agentDir: stri
     console.error(`✗ ${String(e)}`);
     return 1;
   }
+}
+
+// ---------- genpi clean：worktree/分支清理（T38/C5；干跑列示，--force 执行；台账永久保留） ----------
+
+async function cleanCli(argv: string[], projectRoot: string): Promise<number> {
+  const force = argv.includes("--force") || argv.includes("-f");
+  if (!existsSync(join(projectRoot, ".git"))) {
+    console.log("当前目录无 git：无 worktree 可清理。");
+    return 0;
+  }
+  const config = resolveConfig(projectRoot, applyDataRoot(homedir()));
+  const ledger = createFsLedger();
+  const runs = await ledger.listRuns(projectRoot);
+  const plan = planCleanup(runs, {
+    worktreeDir: config.worktreeDir,
+    branchPrefix: config.branchPrefix,
+    existsCheck: (p) => existsSync(p),
+  });
+  if (plan.length === 0) {
+    console.log("没有可清理的 worktree（终态 run 的隔离目录已清空或不存在）。");
+    return 0;
+  }
+  if (!force) {
+    console.log(`可清理 ${plan.length} 个终态 run 的 worktree/分支（台账 .genpi/runs 保留）：`);
+    for (const e of plan) console.log(`  - ${e.runId} [${e.status}] ${e.worktree}${e.dirExists ? "" : "（目录已不存在，仅删分支）"}`);
+    console.log("\n确认后执行：genpi clean --force");
+    return 0;
+  }
+  const results = await executeCleanup(createShellExec(), projectRoot, plan);
+  let failed = 0;
+  for (const r of results) {
+    console.log(`${r.ok ? "✔" : "✗"} ${r.runId}：${r.note}`);
+    if (!r.ok) failed++;
+  }
+  console.log(`\n清理完成：${results.length - failed} 成功 / ${failed} 失败（台账 .genpi/runs 保留审计）`);
+  return failed === 0 ? 0 : 1;
 }
 
 async function selftest(): Promise<number> {

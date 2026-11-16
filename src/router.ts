@@ -59,12 +59,19 @@ export function parsePrefix(request: string): { path?: PathId; text: string } {
 }
 
 /** 模型路由：一次性小会话，失败抛错由上层兜底。 */
+/** 模型路由：一次性小会话，失败抛错由上层兜底。opts.model（T38/F8）：models.router 指定的小快模型，缺省全局默认。 */
 export async function classifyWithModel(
   request: string,
   ctx?: { lastRun?: { runId: string; request: string } },
+  opts?: { model?: string },
 ): Promise<RouteResult> {
   const pi = await import("@earendil-works/pi-coding-agent");
-  const { session } = await pi.createAgentSession({ sessionManager: pi.SessionManager.inMemory() });
+  const { resolveCliModelSafe } = await import("./agent/step-runner");
+  const model = await resolveCliModelSafe(opts?.model);
+  const { session } = await pi.createAgentSession({
+    sessionManager: pi.SessionManager.inMemory(),
+    ...(model ? { model: model as never } : {}),
+  });
   try {
     await session.prompt(
       [
@@ -105,14 +112,14 @@ export async function classifyWithModel(
 /** 路由入口：前缀强制 > 模型判断 > 启发式兜底；无 git 目录强制降级 research（代码路径需 worktree）。 */
 export async function routeRequest(
   request: string,
-  classify: (req: string, ctx?: { lastRun?: { runId: string; request: string } }) => Promise<RouteResult> = classifyWithModel,
-  opts: { allowCodePaths?: boolean; lastRun?: { runId: string; request: string } } = {},
+  classify: (req: string, ctx?: { lastRun?: { runId: string; request: string } }, opts?: { model?: string }) => Promise<RouteResult> = classifyWithModel,
+  opts: { allowCodePaths?: boolean; lastRun?: { runId: string; request: string }; routerModel?: string } = {},
 ): Promise<RouteResult & { text: string }> {
   const { path, text } = parsePrefix(request);
   if (path) return { path, reason: "前缀指定", by: "prefix", tier: "t1", waive: false, title: polishTitle(text), text }; // 前缀是明确意志：tier 不猜，标题本地修饰
   let r: RouteResult;
   try {
-    r = await classify(text, { lastRun: opts.lastRun });
+    r = await classify(text, { lastRun: opts.lastRun }, { model: opts.routerModel }); // T38/F8：models.router 小快模型降路由延迟与成本
   } catch {
     r = heuristicRoute(text);
     if (opts.lastRun && FOLLOWUP_KW.test(text)) r = { ...r, followUp: true }; // 兜底：有上轮 + 指代词命中才承接
