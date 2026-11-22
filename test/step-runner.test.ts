@@ -375,6 +375,39 @@ describe("step-runner", () => {
     // 非 VERIFY 态不因格式拒（证据仅参考）：放行
     expect(crossCheckEvidence(malformed, [], "RESEARCH").ok).toBe(true);
   });
+
+  it("⑱ ESC 中断回归：pi abort 让 prompt 正常 resolve（非抛错）且无 assistant 文本 → 返回 aborted 而非 TypeError", async () => {
+    // 模拟 pi 真实行为：abort() 不抛 AbortError，回合优雅中止，prompt() 平静 resolve；
+    // 等首 token 窗口中断时 getLastAssistantText()=undefined——旧代码 extractQuestions(undefined).split 抛
+    const s: SessionLike = {
+      async prompt() {
+        await new Promise((r) => setTimeout(r, 40));
+      },
+      subscribe: () => () => {},
+      getLastAssistantText: () => undefined as never,
+      dispose: () => {},
+      abort: () => {},
+    };
+    setSessionFactoryForTest(async () => s);
+    try {
+      const runner = createPiStepRunner();
+      const p = runner.run(spec, () => {});
+      await new Promise((r) => setTimeout(r, 5)); // 等 factory 完成、active 已设、prompt 进行中
+      expect(runner.abort).toBeDefined();
+      runner.abort!();
+      const r = await p;
+      expect(r.aborted).toBe(true); // resolve 式中断同样认账
+      expect(r.ok).toBe(false);
+      // 无中断但无 assistant 文本：优雅 fail（无法解析结果块）而非崩
+      const runner2 = createPiStepRunner();
+      const r2 = await runner2.run(spec, () => {});
+      expect(r2.aborted).toBeUndefined();
+      expect(r2.ok).toBe(false);
+      expect(r2.summary).toContain("无法解析结果块");
+    } finally {
+      setSessionFactoryForTest(null);
+    }
+  });
 });
 
 /** 构造 bash 真实执行事件对（start+end）。 */

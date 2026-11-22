@@ -223,7 +223,14 @@ export function createPiStepRunner(opts: PiStepRunnerOptions = {}): StepRunner {
         } finally {
           unsub();
         }
-        text = session.getLastAssistantText();
+        // pi 的 abort 不一定抛 AbortError——也可能让 prompt() 正常 resolve（优雅中止回合）。
+        // resolve 后同样要认中断标志：等首 token 窗口中断时还没有 assistant 消息，
+        // getLastAssistantText()=undefined，旧代码直接进 extractQuestions(undefined).split 抛
+        // TypeError（被上层 catch 显示成 ⚠，ESC 中断回归的根因）
+        if (aborting) {
+          return { ok: false, aborted: true, summary: "用户中断", artifacts: [], evidence: [] };
+        }
+        text = session.getLastAssistantText() ?? ""; // 无 assistant 文本（极早期中断等）按空处理：优雅 fail 而非崩
         for (const q of extractQuestions(text)) onEvent({ type: "question", text: q });
         const parsed = parseResult(text);
         const usage = usageIn + usageOut > 0 ? { input: usageIn, output: usageOut } : undefined;

@@ -110,7 +110,7 @@
 ```bash
 # 源码开发
 npm install && npm run build && npm link
-npm test                     # 128 用例（引擎/路由/风险分级/证据强制/TUI 纯函数/E2E/扩展），全 mock 无需凭证（⑮ 为真实 SDK 事件形状钉子，无模型）
+npm test                     # 129 用例（引擎/路由/风险分级/证据强制/TUI 纯函数/E2E/扩展），全 mock 无需凭证（⑮ 为真实 SDK 事件形状钉子，无模型）
 npm run check:resources      # 方法论无项目耦合残留
 
 # 体验（无模型凭证也能看交互）
@@ -239,7 +239,7 @@ feature/bugfix 在 `.worktrees/<runId>/` 建独立分支（前缀 `feature/`）�
 
 ---
 
-## 7. 测试地图（128 用例，全部无需真模型）
+## 7. 测试地图（129 用例，全部无需真模型）
 
 | 测试文件 | 覆盖 | 怎么 mock |
 | --- | --- | --- |
