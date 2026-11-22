@@ -724,4 +724,21 @@ describe("IMPLEMENT 逐任务循环", () => {
     // 并发 resume 拒绝：A 在 gate 占位，resume 败者 B → GenpiActiveRunError
     await expect(new LoopEngine(w2.deps).resume(loser!.id)).rejects.toBeInstanceOf(GenpiActiveRunError);
   });
+
+  it("㉝ 自审二轮：resume 终态 run 不再白建 worktree——终态检查前置（done 且 worktree 已清 → 直接抛不可恢复，ensure 零调用）", async () => {
+    const w = makeWorld(() => ({ result: ok() }));
+    let ensureCount = 0;
+    const re = w.deps.git.ensureWorktree.bind(w.deps.git);
+    w.deps.git = { ...w.deps.git, ensureWorktree: async (root, id, p, d) => (ensureCount++, re(root, id, p, d)) };
+    const runId = await new LoopEngine(w.deps).start("feature", "跑完的 run");
+    await new LoopEngine(w.deps).decide(runId, { kind: "approve" }); // 过 GATE_DESIGN
+    await new LoopEngine(w.deps).decide(runId, { kind: "approve" }); // 过 GATE_MR → DONE
+    const runDir = join(w.projectRoot, ".genpi", "runs", runId);
+    const rec = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+    expect(rec.status).toBe("done");
+    rmSync(rec.worktree, { recursive: true, force: true }); // 模拟 clean 后目录没了
+    const before = ensureCount;
+    await expect(new LoopEngine(w.deps).resume(runId)).rejects.toThrow("不可恢复");
+    expect(ensureCount).toBe(before); // 关键：不为终态 run 创建 worktree/分支
+  });
 });

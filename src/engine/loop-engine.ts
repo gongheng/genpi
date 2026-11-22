@@ -158,8 +158,11 @@ export class LoopEngine {
       }
     }
     const def = PATHS[rec.path];
-    // 契约 5（P0 补全）：代码路径 resume 时必须有可用 worktree——缺失（start 中途失败的孤儿 run）
-    // 或目录已被清（genpi clean 防丢保留了分支）都补建挂回；失败置 stopped 留 resume 出路，防 IMPLEMENT 落主树
+    if (rec.status === "done" || rec.status === "rejected") throw new Error(`run ${runId} 状态 ${rec.status} 不可恢复`);
+    // 契约 15：resume 同样占位——另一 run 活跃时拒绝；自持占位幂等（崩溃后锁仍在，指向本 run）
+    await this.#acquireOrStop(runId, runDir);
+    // 契约 5（P0 补全）：终态检查/占位之后才补 worktree——要驱动了才动 git，
+    // 否则 resume 一个已终态且 worktree 已被 clean 的 run 会先白建 worktree+分支再抛「不可恢复」
     if (def.needsWorktree && (!rec.worktree || !existsSync(rec.worktree))) {
       rec.worktree = undefined;
       try {
@@ -169,9 +172,6 @@ export class LoopEngine {
         throw e;
       }
     }
-    if (rec.status === "done" || rec.status === "rejected") throw new Error(`run ${runId} 状态 ${rec.status} 不可恢复`);
-    // 契约 15：resume 同样占位——另一 run 活跃时拒绝；自持占位幂等（崩溃后锁仍在，指向本 run）
-    await this.#acquireOrStop(runId, runDir);
     if (rec.status === "gate" || (rec.status === "stopped" && def.gates[rec.currentState])) {
       // stopped 停在门禁态同样重开（契约 19：转 stopped 可续跑，v1.8 修正与提示语/README 的一致性）
       rec.status = "gate";

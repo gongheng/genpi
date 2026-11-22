@@ -248,4 +248,24 @@ describe("worktree + MR", () => {
     expect(r2.mode).toBe("mr");
     expect(cmds.find((c) => c.includes("pr create"))).toContain('--body "由 genpi 生成"');
   });
+
+  it("⑥c 自审二轮：分支已不存在（merged 后手删）→ 只清 worktree 不误报防丢；双缺时无需清理", async () => {
+    const cmds: string[] = [];
+    const exec: ExecFn = async (_cwd, cmd) => {
+      cmds.push(cmd);
+      if (cmd.includes("rev-parse --verify")) return { code: 1, out: "" }; // 分支不存在
+      return { code: 0, out: "" };
+    };
+    const results = await executeCleanup(exec, "/proj", [
+      { runId: "a", status: "done", worktree: "/w/a", branch: "feature/a", dirExists: true },
+      { runId: "b", status: "done", worktree: "/w/b", branch: "feature/b", dirExists: false },
+    ]);
+    expect(results[0]?.ok).toBe(true); // worktree 清掉即成功
+    expect(results[0]?.note).toContain("分支已不存在");
+    expect(results[0]?.note).not.toContain("防丢保留"); // 不误导
+    expect(cmds.some((c) => c.includes('worktree remove "/w/a"'))).toBe(true);
+    expect(cmds.some((c) => c.includes("branch -D"))).toBe(false); // 不对不存在分支执行删除
+    expect(results[1]?.ok).toBe(true); // 双缺：无需清理
+    expect(results[1]?.note).toContain("均已不存在");
+  });
 });

@@ -156,6 +156,22 @@ export async function executeCleanup(
   const results: { runId: string; ok: boolean; note: string }[] = [];
   for (const e of entries) {
     const notes: string[] = [];
+    // 自审二轮：分支已不存在（merged 后手删/已清过一轮）→ -r --contains 会 129 误判「未推送」。
+    // 预检存在性：分支没了只剩 worktree 可清，不走防丢保留的误导提示
+    const existsR = await exec(projectRoot, `git rev-parse --verify --quiet "${e.branch}"`);
+    if (existsR.code !== 0) {
+      if (e.dirExists) {
+        const rm = await exec(projectRoot, `git worktree remove "${e.worktree}"`);
+        if (rm.code === 0) notes.push("分支已不存在，worktree 已删");
+        else {
+          const rmf = await exec(projectRoot, `git worktree remove --force "${e.worktree}"`);
+          notes.push(rmf.code === 0 ? "分支已不存在，worktree 已删（含未提交变更）" : `worktree 删除失败：${(rmf.out || rm.out).slice(-80)}`);
+        }
+      } else notes.push("分支与 worktree 均已不存在，无需清理");
+      const ok = notes.every((n) => !n.includes("失败"));
+      results.push({ runId: e.runId, ok, note: notes.join("；") });
+      continue;
+    }
     // 防丢检查：branch -r --contains 为空 = tip 不在任何远端分支上（命令失败同样按未推送保守处理）
     const rc = await exec(projectRoot, `git branch -r --contains "${e.branch}"`);
     const pushed = rc.code === 0 && rc.out.trim().length > 0;

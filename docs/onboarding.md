@@ -110,7 +110,7 @@
 ```bash
 # 源码开发
 npm install && npm run build && npm link
-npm test                     # 120 用例（引擎/路由/风险分级/证据强制/TUI 纯函数/E2E/扩展），全 mock 无需凭证（⑮ 为真实 SDK 事件形状钉子，无模型）
+npm test                     # 122 用例（引擎/路由/风险分级/证据强制/TUI 纯函数/E2E/扩展），全 mock 无需凭证（⑮ 为真实 SDK 事件形状钉子，无模型）
 npm run check:resources      # 方法论无项目耦合残留
 
 # 体验（无模型凭证也能看交互）
@@ -239,13 +239,13 @@ feature/bugfix 在 `.worktrees/<runId>/` 建独立分支（前缀 `feature/`）�
 
 ---
 
-## 7. 测试地图（120 用例，全部无需真模型）
+## 7. 测试地图（122 用例，全部无需真模型）
 
 | 测试文件 | 覆盖 | 怎么 mock |
 | --- | --- | --- |
-| `engine.test.ts`（33） | ★drive 循环全语义：四路径转移/GATE 死等/budget 连续语义（交错重置）/request_changes 不扣/steering/resume（含承接重建与补建 worktree）/中断/搁置不毒死新 run/T0 短链/T2 注入/prd 循环/CLARIFY 豁免/标题落账/pinned 接线/worktreeSetup/用量落账/worktree 失败置 stopped/active.lock 原子单活跃/mr-body 富化 | StepRunner 全 mock（makeWorld） |
+| `engine.test.ts`（34） | ★drive 循环全语义：四路径转移/GATE 死等/budget 连续语义（交错重置）/request_changes 不扣/steering/resume（含承接重建与补建 worktree；终态不白建）/中断/搁置不毒死新 run/T0 短链/T2 注入/prd 循环/CLARIFY 豁免/标题落账/pinned 接线/worktreeSetup/用量落账/worktree 失败置 stopped/active.lock 原子单活跃/mr-body 富化 | StepRunner 全 mock（makeWorld） |
 | `step-runner.test.ts`（17） | SDK seam：注入装载/证据交叉校验（伪造 exitCode→fail）/恒真式+平凡命令审计拒绝与放行清单（含 pipefail 管道）/pinned 三情形/产物非空/用量聚合/**真实 SDK 事件形状钉子⑮（嵌套 bash 照发 tool_execution_*，exitCode 在 structuredContent.exit_code）**/services 缓存⑯/缺字段诊断⑰ | `setSessionFactoryForTest` |
-| `worktree.test.ts`（12） | 真实 git 仓：worktree 隔离/挂回既有分支/复用补 baseSha/mrPreview/提交完整性警告/planCleanup+executeCleanup（干跑与执行，未推送分支防丢保留）/pushAndMr body-file | 玩具 git 仓/fake exec |
+| `worktree.test.ts`（13） | 真实 git 仓：worktree 隔离/挂回既有分支/复用补 baseSha/mrPreview/提交完整性警告/planCleanup+executeCleanup（干跑与执行，未推送分支防丢保留；已删分支仅清 worktree）/pushAndMr body-file | 玩具 git 仓/fake exec |
 | `ledger.test.ts`（3） | 台账原子写：tmp+rename 无残留、后写为准；active.lock 原子占位（独占/接管/验主幂等）；conversation 裁剪（bounded 增长） | 临时目录 |
 | `e2e-headless.test.ts`（3） | 垂直切片：feature 全循环四件产物/push 降级/单活跃 | fake runner+玩具仓 |
 | `tui.test.ts` + `screens.test.ts`（17） | 纯函数：routeUserInput 分流/parseGateCommand/渲染（含用量展示） | 无 mock（纯函数） |
