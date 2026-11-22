@@ -110,7 +110,7 @@
 ```bash
 # 源码开发
 npm install && npm run build && npm link
-npm test                     # 116 用例（引擎/路由/风险分级/证据强制/TUI 纯函数/E2E/扩展），全 mock 无需凭证
+npm test                     # 120 用例（引擎/路由/风险分级/证据强制/TUI 纯函数/E2E/扩展），全 mock 无需凭证（⑮ 为真实 SDK 事件形状钉子，无模型）
 npm run check:resources      # 方法论无项目耦合残留
 
 # 体验（无模型凭证也能看交互）
@@ -175,9 +175,10 @@ while (rec.status === "active") {
 ### 5.3 StepRunner（step-runner.ts）——唯一的 SDK 边界
 
 - **可测性**：`setSessionFactoryForTest()` 可注入 mock 会话，全部引擎测试无需真模型；
-- **会话构造**：`createAgentSessionServices` + `ModelRuntime`（按 agentDir 缓存免冷启动）+ `resolveCliModel` 解析角色模型；**codemode 工具显式装载+激活**（T39：SDK 会话默认连注册都没有——builtin 装载是 CLI 路径待遇；`createCodemodeExtension()` 入 extensionFactories + `setActiveToolsByName` 增量激活。沙箱脚本嵌套工具调用不进上下文，批量机械操作省 token；嵌套调用走同一工具管道，证据交叉校验照常生效）；
+- **会话构造**：`createAgentSessionServices` + `ModelRuntime`（按 agentDir 缓存免冷启动）+ **services 按（cwd×扩展路径）Promise 级缓存（评审二轮 P2：三层扩展发现/设置读盘每 runner 只付首次，会话仍逐 step 新建隔离不变）** + `resolveCliModel` 解析角色模型；**codemode 工具显式装载+激活**（T39：SDK 会话默认连注册都没有——builtin 装载是 CLI 路径待遇；`createCodemodeExtension()` 入 extensionFactories + `setActiveToolsByName` 增量激活。沙箱脚本嵌套工具调用不进上下文，批量机械操作省 token；嵌套调用走同一工具管道，证据交叉校验照常生效）；
 - **模型三级优先**（契约 16）：`config.models[role]`（implementer/reviewer；另有 `models.router` 供路由分类用小快模型，降延迟与成本）> 交互会话当前模型（跟随 `/model`）> 全局默认；
-- **两阶段 done 的机器验证**（v1.6，契约 4）：收集会话内 `tool_execution_*` 真实 bash 执行记录，与模型自报 `evidence[].exitCode` **交叉校验**——VERIFY 态自报命令无真实执行对应、或 exitCode 不符 → 直接 fail（伪造证据）。这是"agent 宣称→机器验证"第二阶段的实现。v1.10 补强三件：①**恒真式/平凡命令审计** `masksExitCode`——VERIFY 自报命令含 `||`/`;`/无 pipefail 的 `|`/`$(`/反引号/行首 `!`/末尾单 `&`/平凡命令（`echo`/`true`/`:`/`pwd` 等恒 exit 0）即 fail（`npm test || true` 骗不过；`&&`/重定向不掩错、`set -o pipefail `set -o pipefail && ` 前缀`set -o pipefail && ` 前缀`（注意尾随空格）管道放行）；②**pinned 固定验收**——每条必须真实执行且 exit 0，模型无权自选/省略/替换；③**产物存在且非空** `checkArtifacts`——自报 artifacts 逐个在 artifactRoots（运行目录/工作目录/绝对路径）下存在且非空，未落盘/空文件进不了门禁（契约 4a）。
+- **两阶段 done 的机器验证**（v1.6，契约 4）：收集会话内 `tool_execution_*` 真实 bash 执行记录，与模型自报 `evidence[].exitCode` **交叉校验**——VERIFY 态自报命令无真实执行对应、或 exitCode 不符 → 直接 fail（伪造证据）。这是"agent 宣称→机器验证"第二阶段的实现。v1.10 补强三件：①**恒真式/平凡命令审计** `masksExitCode`——VERIFY 自报命令含 `||`/`;`/无 pipefail 的 `|`/`$(`/反引号/行首 `!`/末尾单 `&`/平凡命令（`echo`/`true`/`:`/`pwd` 等恒 exit 0）即 fail（`npm test || true` 骗不过；`&&`/重定向不掩错、`set -o pipefail &&`（注意尾随空格）前缀管道放行）；②**pinned 固定验收**——每条必须真实执行且 exit 0，模型无权自选/省略/替换；③**产物存在且非空** `checkArtifacts`——自报 artifacts 逐个在 artifactRoots（运行目录/工作目录/绝对路径）下存在且非空，未落盘/空文件进不了门禁（契约 4a）。
+- **采集形状钉子（评审二轮 P1，真 bug 修复）**：真实 SDK 事件中 bash 的 exitCode/output 在 `result.structuredContent`（snake_case：`exit_code`），不在顶层——旧采集读顶层恒 undefined，**真实证据从 T38 起从未被采集**（mock 同形未繁觉，非 VERIFY 态静默放行、VERIFY 态误报无法复核）；现 `bashExecResult` 按真实形状采集并兼容旧顶层字段，测试⑮用真实 SDK 会话（嵌套管道、无模型）钉住形状，SDK 升级改形状会红灯；VERIFY 自报缺 exitCode 字段报「结果块格式不完整」而非误导性「与真实执行不符」。
 - **token 用量聚合**（契约 24a，v1.10）：订阅 `message_end`（assistant.usage）聚合 in/out → StepResult.usage → 事件与台账；失败重跑也计量（成本诚实）。
 
 ### 5.4 台账与产物（ledger.ts）
@@ -238,14 +239,14 @@ feature/bugfix 在 `.worktrees/<runId>/` 建独立分支（前缀 `feature/`）�
 
 ---
 
-## 7. 测试地图（116 用例，全部无需真模型）
+## 7. 测试地图（120 用例，全部无需真模型）
 
 | 测试文件 | 覆盖 | 怎么 mock |
 | --- | --- | --- |
 | `engine.test.ts`（33） | ★drive 循环全语义：四路径转移/GATE 死等/budget 连续语义（交错重置）/request_changes 不扣/steering/resume（含承接重建与补建 worktree）/中断/搁置不毒死新 run/T0 短链/T2 注入/prd 循环/CLARIFY 豁免/标题落账/pinned 接线/worktreeSetup/用量落账/worktree 失败置 stopped/active.lock 原子单活跃/mr-body 富化 | StepRunner 全 mock（makeWorld） |
-| `step-runner.test.ts`（14） | SDK seam：注入装载/证据交叉校验（伪造 exitCode→fail）/恒真式+平凡命令审计拒绝与放行清单（含 pipefail 管道）/pinned 三情形/产物非空/用量聚合 | `setSessionFactoryForTest` |
+| `step-runner.test.ts`（17） | SDK seam：注入装载/证据交叉校验（伪造 exitCode→fail）/恒真式+平凡命令审计拒绝与放行清单（含 pipefail 管道）/pinned 三情形/产物非空/用量聚合/**真实 SDK 事件形状钉子⑮（嵌套 bash 照发 tool_execution_*，exitCode 在 structuredContent.exit_code）**/services 缓存⑯/缺字段诊断⑰ | `setSessionFactoryForTest` |
 | `worktree.test.ts`（12） | 真实 git 仓：worktree 隔离/挂回既有分支/复用补 baseSha/mrPreview/提交完整性警告/planCleanup+executeCleanup（干跑与执行，未推送分支防丢保留）/pushAndMr body-file | 玩具 git 仓/fake exec |
-| `ledger.test.ts`（2） | 台账原子写：tmp+rename 无残留、后写为准；active.lock 原子占位（独占/接管/验主幂等） | 临时目录 |
+| `ledger.test.ts`（3） | 台账原子写：tmp+rename 无残留、后写为准；active.lock 原子占位（独占/接管/验主幂等）；conversation 裁剪（bounded 增长） | 临时目录 |
 | `e2e-headless.test.ts`（3） | 垂直切片：feature 全循环四件产物/push 降级/单活跃 | fake runner+玩具仓 |
 | `tui.test.ts` + `screens.test.ts`（17） | 纯函数：routeUserInput 分流/parseGateCommand/渲染（含用量展示） | 无 mock（纯函数） |
 | `router/config/ext-manager/extensions/resources`（35） | 四分类路由/tier 启发式/豁免判定/标题生成/routerModel 穿插/三级配置（worktreeSetup、models.router）/扩展管理/装载/资源 | 各自 seam |

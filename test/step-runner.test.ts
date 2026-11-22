@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkArtifacts, composePrompt, createPiStepRunner, crossCheckEvidence, extractQuestions, masksExitCode, parseResult, setSessionFactoryForTest, toolDetail, type SessionLike } from "../src/agent/step-runner";
+import { bashExecResult, cachedServices, checkArtifacts, composePrompt, createPiStepRunner, crossCheckEvidence, extractQuestions, masksExitCode, parseResult, setSessionFactoryForTest, toolDetail, type SessionLike } from "../src/agent/step-runner";
 import type { CommandEvidence, StepSpec } from "../src/types";
 
 function fakeSession(finalText: string, opts: { deltas?: string[]; id?: string; streamEvents?: { type: string; delta?: string; toolCall?: { name?: string; arguments?: unknown } }[]; toolEvents?: unknown[] } = {}): SessionLike {
@@ -302,12 +302,87 @@ describe("step-runner", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("⑮ P1/#1 真实 SDK 事件形状钉子（契约 4/codemode）：嵌套 bash 调用照发 tool_execution_*（带 parentToolCallId），exitCode 在 structuredContent.exit_code——采集按真实形状工作", async () => {
+    const pi = await import("@earendil-works/pi-coding-agent");
+    const root = join(tmpdir(), `genpi-t-nested-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(join(root, "home", ".genpi"), { recursive: true });
+    mkdirSync(join(root, "cwd"), { recursive: true });
+    try {
+      const services = await pi.createAgentSessionServices({
+        cwd: join(root, "cwd"),
+        agentDir: join(root, "home", ".genpi"),
+        resourceLoaderOptions: { extensionFactories: [pi.createCodemodeExtension()] },
+      });
+      const { session } = await pi.createAgentSessionFromServices({
+        services,
+        sessionManager: pi.SessionManager.create(join(root, "cwd"), join(root, "home", ".genpi", "sessions")),
+      });
+      const events: { type?: string; toolName?: string; toolCallId?: string; parentToolCallId?: string; args?: { command?: string }; result?: unknown }[] = [];
+      const unsub = session.subscribe((e) => events.push(e as never));
+      // 注入 assistant message：runToolCall 管道要求存在发起方消息（SDK 公开赋值面）
+      session.agent.state.messages = [{ role: "assistant", content: [{ type: "text", text: "probe" }] }] as never;
+      // 经真实嵌套管道执行 bash（codemode 脚本内 tools.bash 即走此路径；_executeNestedToolCall 为 SDK 内部入口，
+      // 无公开 API 驱动——此测试钉住其对外可观测行为，SDK 升级改形状会在此红灯）
+      const nested = session as unknown as { _executeNestedToolCall: (parentId: string, name: string, args: unknown) => Promise<unknown> };
+      await nested._executeNestedToolCall("call_probe", "bash", { command: "echo nested-ok" });
+      await nested._executeNestedToolCall("call_probe", "bash", { command: "exit 3" });
+      unsub();
+
+      const ends = events.filter((e) => e.type === "tool_execution_end" && e.toolName === "bash");
+      expect(ends).toHaveLength(2);
+      expect(ends.every((e) => e.parentToolCallId === "call_probe")).toBe(true); // 嵌套标记（codemode 场景）
+      // 采集逻辑对真实形状生效：exit 0 与非零 exit 3 都可读
+      expect(bashExecResult(ends[0]?.result)).toEqual({ exitCode: 0, output: "nested-ok\n" });
+      expect(bashExecResult(ends[1]?.result).exitCode).toBe(3);
+      // 旧顶层形状兼容（防 SDK 形状回退/演进时静默丢证据）
+      expect(bashExecResult({ exitCode: 0, output: "x" })).toEqual({ exitCode: 0, output: "x" });
+      expect(bashExecResult(undefined)).toEqual({});
+      await session.dispose();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("⑯ P2/#3 services 缓存：同 key 只建一次（含并发 Promise 级去重），失败驱逐可重试", async () => {
+    const cache = new Map<string, Promise<{ id: number }>>();
+    let next = 0;
+    let fail = false;
+    const create = async (): Promise<{ id: number }> => {
+      if (fail) throw new Error("boom");
+      return { id: next++ };
+    };
+    const a = await cachedServices(cache, "k", create);
+    const b = await cachedServices(cache, "k", create);
+    expect(a).toBe(b); // 同 key 复用同一实例
+    expect(next).toBe(1);
+    const [c, d] = await Promise.all([cachedServices(cache, "k2", create), cachedServices(cache, "k2", create)]);
+    expect(c).toBe(d); // 并发去重：同一 Promise
+    expect(next).toBe(2);
+    fail = true;
+    await expect(cachedServices(cache, "k3", create)).rejects.toThrow("boom");
+    expect(cache.has("k3")).toBe(false); // 失败驱逐
+    fail = false;
+    await expect(cachedServices(cache, "k3", create)).resolves.toEqual({ id: 2 }); // 可重试
+  });
+
+  it("⑰ P3/#5 证据缺 exitCode 字段：VERIFY 报「结果块格式不完整」而非误导性「与真实执行不符」", () => {
+    const malformed = [{ command: "npm test" }] as unknown as CommandEvidence[]; // 缺 exitCode
+    const r = crossCheckEvidence(malformed, [{ command: "npm test", exitCode: 0, outputTail: "" }], "VERIFY");
+    expect(r.ok).toBe(false);
+    expect(r.note).toContain("缺 exitCode 字段");
+    expect(r.note).toContain("格式不完整");
+    // 非 VERIFY 态不因格式拒（证据仅参考）：放行
+    expect(crossCheckEvidence(malformed, [], "RESEARCH").ok).toBe(true);
+  });
 });
 
 /** 构造 bash 真实执行事件对（start+end）。 */
 function bashToolEvents(command: string, exitCode: number, output = "done"): unknown[] {
+  // P1/#1：对齐真实 SDK 形状——exitCode/output 在 result.structuredContent（snake_case），不在顶层
+  // （旧 mock 造的顶层形状与真实不符，掩盖了采集 bug）
   return [
     { type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command } },
-    { type: "tool_execution_end", toolCallId: "t1", toolName: "bash", result: { exitCode, output } },
+    { type: "tool_execution_end", toolCallId: "t1", toolName: "bash", result: { structuredContent: { exit_code: exitCode, output, truncated: false } } },
   ];
 }

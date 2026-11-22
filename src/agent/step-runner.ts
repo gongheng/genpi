@@ -61,7 +61,7 @@ export async function resolveCliModelSafe(model?: string): Promise<unknown | und
     const resolved = pi.resolveCliModel({ cliModel: model, modelRuntime: rt as never });
     return resolved.model ?? undefined;
   } catch {
-    return undefined; // 解析失败回落全局默认（与 defaultFactory 同策略）
+    return undefined; // 解析失败回落全局默认（与真实工厂同策略）
   }
 }
 
@@ -75,24 +75,43 @@ async function getModelRuntime(pi: typeof import("@earendil-works/pi-coding-agen
   return rt;
 }
 
-async function defaultFactory(
-  opts: { cwd: string; model?: string; extensions?: InlineExtension[]; additionalExtensionPaths?: string[] },
-): Promise<SessionLike> {
+/**
+ * P2/#3：services（含资源装载三层扩展发现/设置读盘）按 key 缓存——Promise 级去重（同 key 并发只建一次，
+ * 长 run 的多 step 冷启动只付首次）；失败驱逐不缓存，下次重试。会话仍每 step 新建（上下文隔离不变）。
+ */
+export function cachedServices<T>(cache: Map<string, Promise<T>>, key: string, create: () => Promise<T>): Promise<T> {
+  const hit = cache.get(key);
+  if (hit) return hit;
+  const p = create().catch((e: unknown) => {
+    cache.delete(key);
+    throw e;
+  });
+  cache.set(key, p);
+  return p;
+}
+
+function buildSessionFactory(): SessionFactory {
+  // 每 factory 实例独立缓存（createPiStepRunner 每 runner 建一个）：不同 bootstrap 的内联扩展集不共享 services（防扩展污染）
+  const servicesCache = new Map<string, Promise<unknown>>();
+  return async (opts) => {
   // services 化：modelRuntime 可按角色解析 Model 对象（契约 16）；会话仍持久（genpi 数据根）供审计
   // T39：codemode 工具（沙箱脚本，嵌套工具调用不进上下文）——SDK 会话默认连注册都没有（builtin 装载是
   // CLI 路径待遇，defaultActive:false）；genpi 显式装载+激活：IMPLEMENT/DEBUG 批量机械操作省 token 降 compaction。
   // 零新依赖：createCodemodeExtension 从已依赖的包根导出；嵌套调用走同一工具管道，tool_execution_* 事件
-  // 照发——契约 4 证据交叉校验与恒真式审计对脚本内命令同样生效。
+  // 照发（实测形状见 step-runner 测试⑮）——契约 4 证据交叉校验与恒真式审计对脚本内命令同样生效。
   const pi = await loadPi();
-  const services = await pi.createAgentSessionServices({
-    cwd: opts.cwd,
-    agentDir: pi.getAgentDir(),
-    modelRuntime: (await getModelRuntime(pi, pi.getAgentDir())) as never, // 缓存：每 step 不再冷启动读盘
-    resourceLoaderOptions: {
-      extensionFactories: [pi.createCodemodeExtension(), ...(opts.extensions ?? [])],
-      ...(opts.additionalExtensionPaths?.length ? { additionalExtensionPaths: opts.additionalExtensionPaths } : {}),
-    },
-  });
+  const cacheKey = `${opts.cwd}::${(opts.additionalExtensionPaths ?? []).join(",")}::${opts.extensions?.length ?? 0}`;
+  const services = (await cachedServices(servicesCache, cacheKey, async () =>
+    pi.createAgentSessionServices({
+      cwd: opts.cwd,
+      agentDir: pi.getAgentDir(),
+      modelRuntime: (await getModelRuntime(pi, pi.getAgentDir())) as never, // 缓存：每 step 不再冷启动读盘
+      resourceLoaderOptions: {
+        extensionFactories: [pi.createCodemodeExtension(), ...(opts.extensions ?? [])],
+        ...(opts.additionalExtensionPaths?.length ? { additionalExtensionPaths: opts.additionalExtensionPaths } : {}),
+      },
+    }),
+  )) as Awaited<ReturnType<typeof pi.createAgentSessionServices>>;
   let model: unknown;
   if (opts.model) {
     const resolved = pi.resolveCliModel({ cliModel: opts.model, modelRuntime: services.modelRuntime });
@@ -108,7 +127,10 @@ async function defaultFactory(
   // SAFETY: SDK AgentSession 结构满足 SessionLike（prompt/subscribe/getLastAssistantText/dispose/abort），
   // 历史验证于 step-runner 测试——双 cast 仅抹平 SDK 类型参数差异，运行时形状一致。
   return session as unknown as SessionLike;
+  };
 }
+
+// 真实工厂由 createPiStepRunner 每 runner 实例化（services 缓存随 runner 生命周期，不跨 runner 共享）
 
 export interface PiStepRunnerOptions {
   model?: string;
@@ -124,6 +146,7 @@ export interface PiStepRunnerOptions {
 }
 
 export function createPiStepRunner(opts: PiStepRunnerOptions = {}): StepRunner {
+  const ownFactory = buildSessionFactory(); // 每 runner 独立：services 缓存随 runner 生命周期，不跨 runner 共享（自审修正）
   let active: SessionLike | null = null;
   let aborting = false;
   return {
@@ -134,7 +157,7 @@ export function createPiStepRunner(opts: PiStepRunnerOptions = {}): StepRunner {
     },
     async run(spec: StepSpec, onEvent: (e: StepEvent) => void): Promise<StepResult> {
       aborting = false;
-      const factory = testFactory ?? defaultFactory;
+      const factory = testFactory ?? ownFactory;
       const session = await factory({
         cwd: spec.workingDir,
         model: (spec.role && opts.models?.[spec.role]) || opts.defaultModel?.() || opts.model,
@@ -154,21 +177,24 @@ export function createPiStepRunner(opts: PiStepRunnerOptions = {}): StepRunner {
             toolCallId?: string;
             toolName?: string;
             args?: { command?: string };
-            result?: { exitCode?: number; output?: string; outputTail?: string };
+            result?: { exitCode?: number; output?: string; outputTail?: string; structuredContent?: { exit_code?: number; output?: string } };
             assistantMessageEvent?: {
               type?: string;
               delta?: string;
               toolCall?: { name?: string; arguments?: unknown };
             };
           };
-          // 机器证据源（契约 4）：bash 真实执行记录
+          // 机器证据源（契约 4）：bash 真实执行记录（含 codemode 嵌套调用——同管道同事件形状，带 parentToolCallId）
           if (e.type === "tool_execution_start" && e.toolName === "bash" && e.toolCallId) {
             if (e.args?.command) toolCalls.set(e.toolCallId, { command: e.args.command });
           } else if (e.type === "tool_execution_end" && e.toolName === "bash" && e.toolCallId) {
             const prev = toolCalls.get(e.toolCallId);
-            if (prev && e.result && typeof e.result.exitCode === "number") {
-              prev.exitCode = e.result.exitCode;
-              prev.outputTail = (e.result.outputTail ?? e.result.output ?? "").split("\n").slice(-3).join("\n").slice(0, 200);
+            if (prev) {
+              const { exitCode, output } = bashExecResult(e.result); // P1/#1：真实形状在 structuredContent.exit_code
+              if (typeof exitCode === "number") {
+                prev.exitCode = exitCode;
+                prev.outputTail = (output ?? "").split("\n").slice(-3).join("\n").slice(0, 200);
+              }
             }
           } else if (e.type === "message_update" && e.assistantMessageEvent) {
             const ae = e.assistantMessageEvent;
@@ -221,6 +247,31 @@ export function createPiStepRunner(opts: PiStepRunnerOptions = {}): StepRunner {
 }
 
 const normCmd = (c: string): string => c.trim().replace(/\s+/g, " ");
+
+/**
+ * 从 tool_execution_end.result 提取 bash 的 exitCode/output（真实 SDK 形状钉子，P1/#1）：
+ * 实测（含 codemode 嵌套调用，同经 runToolCall 管道）exitCode 在 result.structuredContent.exit_code
+ * （snake_case），不在顶层——旧代码读 e.result.exitCode 恒 undefined，真实证据从未被采集（mock 同形未繁觉）。
+ * 兼容旧顶层字段（exitCode/output/outputTail）以防 SDK 形状演进。
+ */
+export function bashExecResult(result: unknown): { exitCode?: number; output?: string } {
+  const r = result as
+    | { exitCode?: number; output?: string; outputTail?: string; structuredContent?: { exit_code?: number; output?: string } }
+    | undefined;
+  if (!r) return {};
+  const sc = r.structuredContent;
+  let exitCode: number | undefined;
+  if (typeof r.exitCode === "number") exitCode = r.exitCode;
+  else if (typeof sc?.exit_code === "number") exitCode = sc.exit_code;
+  let output: string | undefined;
+  if (typeof sc?.output === "string") output = sc.output;
+  else if (typeof r.output === "string") output = r.output;
+  else if (typeof r.outputTail === "string") output = r.outputTail;
+  const out: { exitCode?: number; output?: string } = {};
+  if (exitCode !== undefined) out.exitCode = exitCode;
+  if (output !== undefined) out.output = output;
+  return out;
+}
 
 /**
  * 恒真式/平凡命令审计（T38/A1① + 证据强制 II，纯函数）：能抹掉真实退出码的命令一律拒绝。
@@ -286,6 +337,13 @@ export function crossCheckEvidence(
   if (state === "VERIFY") {
     for (const c of claimed) {
       if (masksExitCode(c.command)) return { ok: false, note: `验证命令含恒真式构造（拒绝）：${c.command}` };
+    }
+    // P3/#5：格式完整性先行——缺 exitCode 直接报格式问题（模型结果块残缺），
+    // 而非误导性的「证据与真实执行不符」（NaN/undefined 比较永不相等的下游症状）
+    for (const c of claimed) {
+      if (typeof (c as { exitCode?: number }).exitCode !== "number") {
+        return { ok: false, note: `自报证据缺 exitCode 字段（结果块格式不完整）：${c.command}` };
+      }
     }
     for (const p of pinned ?? []) {
       const r = realByCmd.get(normCmd(p));

@@ -110,7 +110,18 @@ export function createFsLedger(now: () => Date = () => new Date()): Ledger {
       await writeFile(join(runDir, "phase-history.jsonl"), `${JSON.stringify(entry)}\n`, { flag: "a" });
     },
     async appendConversation(projectRoot, line) {
-      await writeFile(join(projectRoot, ".genpi", "conversation.md"), `${line}\n`, { flag: "a" });
+      const dir = join(projectRoot, ".genpi");
+      const p = join(dir, "conversation.md");
+      await mkdir(dir, { recursive: true }); // 父目录自洽：无 runs 先行时也能落盘（生产中被 try/catch 吞过）
+      await writeFile(p, `${line}\n`, { flag: "a" });
+      // P3/#6：滚动摘要无限增长防护——超 200 行裁到最近 100 行（背景注入只用最近 5 条，裁剪不损语义）
+      try {
+        const text = await readFile(p, "utf8");
+        const lines = text.split("\n").filter(Boolean);
+        if (lines.length > 200) await writeFile(p, `${lines.slice(-100).join("\n")}\n`);
+      } catch {
+        /* 回读失败不影响 append 主流程 */
+      }
     },
     async recentConversation(projectRoot, n = 5) {
       try {

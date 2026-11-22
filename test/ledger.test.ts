@@ -70,4 +70,21 @@ describe("fs ledger", () => {
     await ledger.releaseActive(root, b.runId);
     expect(await ledger.listRuns(root)).toHaveLength(2); // 占位文件不入台账列表
   });
+
+  it("P3/#6 会话滚动摘要裁剪：跨过 200 行触发裁剪到最近 100（渐进式），bounded 且 recentConversation 取尾不变", async () => {
+    const root = mkd();
+    const ledger = createFsLedger();
+    for (let i = 1; i <= 205; i++) await ledger.appendConversation(root, `line-${i}`);
+    const lines = readFileSync(join(root, ".genpi", "conversation.md"), "utf8").split("\n").filter(Boolean);
+    // 渐进语义：第 201 次 append 触发裁剪到最近 100（102..201），其后 4 次追加 → 104 行
+    expect(lines).toHaveLength(104);
+    expect(lines[0]).toBe("line-102"); // 裁剪保留最近 100
+    expect(lines.at(-1)).toBe("line-205");
+    expect(lines.length).toBeLessThanOrEqual(201); // bounded：永不超跟一个窗口
+    expect(await ledger.recentConversation(root, 5)).toEqual(["line-201", "line-202", "line-203", "line-204", "line-205"]);
+    // 未超限不裁
+    const root2 = mkd();
+    for (let i = 1; i <= 51; i++) await ledger.appendConversation(root2, `l-${i}`);
+    expect(readFileSync(join(root2, ".genpi", "conversation.md"), "utf8").split("\n").filter(Boolean)).toHaveLength(51);
+  });
 });
