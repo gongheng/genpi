@@ -760,6 +760,7 @@ describe("IMPLEMENT 逐任务循环", () => {
     {
       const { w, release } = mkQAWorld();
       const engine = new LoopEngine(w.deps);
+      expect(engine.abort()).toBe(false); // 无活跃循环：不受理（启动窗口，展示层提示改走 /genpi-stop）
       let runId = "";
       const startP = engine.start("feature", w.request, (id) => (runId = id)).then(() => "resolved");
       await vi.waitFor(() => expect(w.asked).toEqual(["Q1?"]));
@@ -777,7 +778,7 @@ describe("IMPLEMENT 逐任务循环", () => {
       let runId = "";
       const startP = engine.start("feature", w.request, (id) => (runId = id)).then(() => "resolved");
       await vi.waitFor(() => expect(w.asked).toEqual(["Q1?"]));
-      engine.abort(); // Q&A 期 escape
+      expect(engine.abort()).toBe(true); // Q&A 期 escape：有活跃循环，受理
       release();
       await startP;
       expect(w.asked).toEqual(["Q1?"]);

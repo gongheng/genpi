@@ -37,6 +37,18 @@ export function parseGateCommand(input: string): { command: GateCommand; hint?: 
 
 export type InputPhase = "idle" | "routing" | "run" | "gate" | "awaiting-answer";
 
+/**
+ * escape 归属判定（纯函数，测试面）：run 相位全程中断——含等首 token/建会话/首个动作是长工具
+ * 调用/任务间隙等**无流式窗口**（这些窗口工作真实在进行，旧版仅在 delta 到达后接管，是「按
+ * ESC 没反应、一直在工作」的根因）；Q&A 等待期中断挂起问题；其余透传给 pi（保留编辑器 Esc 语义）。
+ * 代价：run 相位里编辑器补全菜单的 Esc 关闭会被抢为中断（罕见且可恢复——菜单仍在，重按即可）。
+ */
+export function escapeAction(phase: InputPhase, hasPendingAnswer: boolean): "abort-step" | "abort-qa" | "pass" {
+  if (phase === "run") return "abort-step";
+  if (phase === "awaiting-answer" && hasPendingAnswer) return "abort-qa";
+  return "pass";
+}
+
 /** 决定一段用户输入落到哪里：待答问题 > 门禁命令 > 新循环 > 运行中插话。 */
 export function routeUserInput(
   phase: InputPhase,
@@ -95,7 +107,6 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
   let apiRef: ExtensionAPI | null = null;
   let live = createStepLiveState();
   let widgetTimer: ReturnType<typeof setTimeout> | null = null;
-  let streaming = false; // step 流式进行中（escape 归属中断，契约 19）
   let booted = false; // session_start 幂等守卫：pi 启动期可能多次触发（init/信任重绑），欢迎只发一次
 
   function say(text: string): void {
@@ -170,29 +181,23 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
       case "state_entered":
         endStreamWidget();
         live = createStepLiveState(e.state);
-        streaming = false;
         // T26：状态行不进聊天流——footer(setStatus) 与 widget 标题已实时显示，聊天流只留需要用户在场的节点
         status(`${currentPath} · ${e.state}`);
         break;
       case "step_stream":
-        streaming = true;
         pushLive("text", e.delta);
         break;
       case "step_thinking":
-        streaming = true;
         pushLive("thinking", e.delta);
         break;
       case "step_tool":
-        streaming = true;
         pushTool(e.name, e.detail);
         break;
       case "step_finished":
-        streaming = false; // 步末（含问答间隙）不再抢 escape
         if (!e.aborted) say(fmtStepDigest(e.state, e.ok, e.summary, e.artifacts, e.usage)); // T26 一行摘要 + T34 产物指路 + T38/D6 用量；aborted 由 run_stopped 报
         break;
       case "gate_opened":
         endStreamWidget();
-        streaming = false;
         handleGate(e.gate, e.artifactPath, e.preview);
         break;
       case "run_done":
@@ -381,20 +386,23 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
     pi.on("session_start", (_event, ctx) => {
       uiRef = ctx.ui;
       if (ctx.model) lastModel = `${ctx.model.provider}/${ctx.model.id}`; // 步骤会话跟随 /model 切换
-      // escape 中断当前 step（契约 19）：流式期与 Q&A 等待期都可中断（自洽修复：等待提问不再是逃生盲区），
-      // 其余相位不接管，避免抢编辑器的 Esc 语义
+      // escape 中断（契约 19）：run 相位全程接管（escapeAction 纯函数——无流式窗口也能中断，
+      // 修复「按 ESC 没反应」）；其余相位透传，保留编辑器的 Esc 语义（补全菜单等）
       ctx.ui.onTerminalInput((data) => {
-        if (data !== "\x1b" || !currentRunId) return undefined;
-        if (streaming && phase === "run") {
-          streaming = false;
-          engine.abort();
-          say("⏹ 中断当前步骤…（run 保留，可继续或 /genpi-stop 废弃）");
+        if (data !== "\x1b") return undefined;
+        const act = escapeAction(phase, answerResolver !== null);
+        if (act === "abort-step") {
+          const accepted = engine.abort(); // 安全：无活跃循环内部 no-op；间隙中断置 pendingAbort 下一 step 边界生效
+          say(accepted ? "⏹ 中断当前步骤…（run 保留，可继续或 /genpi-stop 废弃）" : "⏹ 当前无活跃步骤（run 启动中，如需放弃用 /genpi-stop）");
           return { consume: true };
         }
-        if (phase === "awaiting-answer" && answerResolver) {
+        if (act === "abort-qa") {
           // Q&A 期 escape：挂起问题按「用户中断」作答 + abort 置标志——下一问/步边界消费，run 转 stopped
-          answerResolver("（用户中断，请停止当前步骤）");
-          answerResolver = null;
+          const r = answerResolver;
+          if (r) {
+            r("（用户中断，请停止当前步骤）");
+            answerResolver = null;
+          }
           engine.abort();
           say("⏹ 中断当前步骤…（run 保留，可继续或 /genpi-stop 废弃）");
           return { consume: true };

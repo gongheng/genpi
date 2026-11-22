@@ -252,10 +252,13 @@ export class LoopEngine {
     this.steering.set(runId, q);
   }
 
-  /** 契约 19：中断当前在跑的 step（escape）：StepResult.aborted，不扣 budget，run 转 stopped 可续跑。会话间隙收到时置 pendingAbort，下一 step 前生效。 */
-  abort(): void {
-    if (this.driving) this.pendingAbort = true; // 仅当有活跃 drive 循环：否则置位无人消费，会毒死下一个 run（1607 回归）
+  /** 契约 19：中断当前在跑的 step（escape）：StepResult.aborted，不扣 budget，run 转 stopped 可续跑。会话间隙收到时置 pendingAbort，下一 step 前生效。
+   * 返回是否有活跃循环受理（false=启动窗口如 worktree 依赖引导，无步骤可断——展示层可提示改走 /genpi-stop）。 */
+  abort(): boolean {
+    const accepted = this.driving !== null;
+    if (accepted) this.pendingAbort = true; // 仅当有活跃 drive 循环：否则置位无人消费，会毒死下一个 run（1607 回归）
     this.deps.runner.abort?.();
+    return accepted;
   }
 
   /** 契约 19：废弃 run（/genpi-stop）：台账保留，status=stopped；若在 step 中先 abort。 */

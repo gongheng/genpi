@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseGateCommand, routeUserInput, type InputPhase } from "../src/tui/app";
+import { escapeAction, parseGateCommand, routeUserInput, type InputPhase } from "../src/tui/app";
 
 describe("门禁命令解析（聊天内 a/c/r）", () => {
   it("① a/批准/通过/approve → 批准", () => {
@@ -51,5 +51,24 @@ describe("输入分流（聊天单输入框的调度核心）", () => {
     expect(r.target).toBe("gate-hint");
     expect(r.hint).toContain("a 批准");
     expect(routeUserInput("idle", null, "   ").target).toBe("ignore");
+  });
+});
+
+describe("escape 归属判定（无流式窗口也可中断——修复「按 ESC 没反应」）", () => {
+  it("① run 相位全程 abort-step：不依赖 streaming（等首 token/建会话/长工具调用/任务间隙都在内）", () => {
+    for (const phase of ["run"] as InputPhase[]) {
+      expect(escapeAction(phase, false)).toBe("abort-step");
+      expect(escapeAction(phase, true)).toBe("abort-step"); // run 优先于挂起问题（不可能同时出现，防御）
+    }
+  });
+  it("② awaiting-answer：有挂起问题 → abort-qa；无（已答完）→ pass", () => {
+    expect(escapeAction("awaiting-answer", true)).toBe("abort-qa");
+    expect(escapeAction("awaiting-answer", false)).toBe("pass");
+  });
+  it("③ 其余相位透传给 pi（保留编辑器 Esc 语义）", () => {
+    for (const phase of ["idle", "routing", "gate"] as InputPhase[]) {
+      expect(escapeAction(phase, true)).toBe("pass");
+      expect(escapeAction(phase, false)).toBe("pass");
+    }
   });
 });
