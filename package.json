@@ -32,9 +32,10 @@
   "scripts": {
     "build": "tsup src/cli.ts src/config.ts src/agent/step-runner.ts src/engine/bootstrap.ts src/resources/index.ts --format esm --dts --outDir dist && node scripts/copy-resources.mjs",
     "test": "vitest run",
+    "smoke:e2e": "npm run build && node scripts/smoke-e2e.mjs",
     "check:resources": "node scripts/check-resources.mjs",
     "prepare": "npm run build",
-    "prepublishOnly": "npm run check:resources && npm test && npm run build"
+    "prepublishOnly": "npm run check:resources && npm test && npm run build && node scripts/smoke-e2e.mjs --if-creds"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^1.6.0",

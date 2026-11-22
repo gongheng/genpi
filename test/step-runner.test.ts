@@ -202,6 +202,20 @@ describe("step-runner", () => {
     }
   });
 
+  it("⑧b v3 段落级匹配：自报裸命令与真实 `cd X && cmd` 链对应（链整体退出码比对）；pinned 同理", () => {
+    const claimed: CommandEvidence[] = [{ command: "cat hello.txt", exitCode: 0, outputTail: "" }];
+    const real: CommandEvidence[] = [{ command: "cd /tmp/repo && cat hello.txt", exitCode: 0, outputTail: "" }];
+    expect(crossCheckEvidence(claimed, real, "VERIFY").ok).toBe(true); // 段相等→对应执行
+    // 链整体失败但自报 0 → 仍 mismatch（伪造拦截不放松）
+    const realFail: CommandEvidence[] = [{ command: "cd /nope && cat hello.txt", exitCode: 1, outputTail: "no such" }];
+    expect(crossCheckEvidence(claimed, realFail, "VERIFY").ok).toBe(false);
+    // 完全无关命令 → 无法复核
+    expect(crossCheckEvidence(claimed, [{ command: "ls -la", exitCode: 0, outputTail: "" }], "VERIFY").ok).toBe(false);
+    // pinned：模型加了 cd 前缀执行也算真实执行
+    const realP: CommandEvidence[] = [{ command: "cd /repo && npm test", exitCode: 0, outputTail: "" }];
+    expect(crossCheckEvidence([], realP, "VERIFY", ["npm test"]).ok).toBe(true);
+  });
+
   it("⑩ 恒真式/平凡命令识别（A1① + 证据强制 II：拒掩错复合与平凡命令，放行 pipefail 管道与不掩错构造）", () => {
     const deny = [
       "npm test || true",
@@ -221,6 +235,13 @@ describe("step-runner", () => {
       "exit 0",
       "echo ok",
       "echo \"构建成功\"",
+      // v2 管道末段恒 0 变换器：掩上游失败仍拒（E2E 反馈：断言式管道放行，变换器管道拒）
+      "npm test | head -5",
+      "cat f.txt | sort",
+      "npm test 2>&1 | wc -l",
+      // v3：非 test/[ 包裹的 $() 仍拒（结果被忽略/回显）
+      'echo "$(cat f)"',
+      'npm test && echo "$(date)"',
     ];
     for (const c of deny) expect(masksExitCode(c), c).toBe(true);
     const allow = [
@@ -233,6 +254,14 @@ describe("step-runner", () => {
       // 管道 + pipefail 前缀：退出码取最右非零，长输出截断不再一刀切
       "set -o pipefail && npm test 2>&1 | tail -50",
       "set -o pipefail && cat a.txt | grep -c foo",
+      // v2 末段断言管道：exit code 有意义——E2E 实测模型自然写法，v1 一刀切致 VERIFY 死亡螺旋
+      "cat hello.txt | grep -q \"hello genpi e2e\"",
+      "diff a.txt b.txt | jq -e .",
+      "echo hi | grep -q hi", // 末段 grep 断言：放行（echo 在管道头部无妨）
+      "cat log | awk '/ERROR/{found=1} END{exit !found}'",
+      // v3：test/[ 包裹的 $() 是合法内容断言（替换失败传染为断言失败）
+      'test "$(cat hello.txt)" = "hello genpi e2e"',
+      '[ "$(cat f)" = "expected" ]',
     ];
     for (const c of allow) expect(masksExitCode(c), c).toBe(false);
   });

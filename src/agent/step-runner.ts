@@ -280,22 +280,33 @@ export function bashExecResult(result: unknown): { exitCode?: number; output?: s
   return out;
 }
 
+/** 管道末段可断言命令（exit code 有意义）：放行——如 `cat f | grep -q x` 是合法验收；
+ * 其余末段（head/tail/tee/wc/sort 等恒 0 变换器）取变换器退出码，掩掉上游失败——仍拒。 */
+const PIPE_ASSERTIVE_TAIL = /^(grep|egrep|fgrep|rg|test|\[|\[\[|diff|cmp|jq|awk|python3?|node|ruby|perl|sh|bash|zsh|deno|bun)\b/;
+
 /**
- * 恒真式/平凡命令审计（T38/A1① + 证据强制 II，纯函数）：能抹掉真实退出码的命令一律拒绝。
- * 拒绝：`||`、`;`、`|`（无 pipefail 时取末命令退出码）、`$(...)`、反引号、行首 `!` 取反、末尾单 `&` 后台、
- * 平凡命令（`true`/`:`/`pwd`/`exit 0`/`echo …`——恒 exit 0，验收语义为空）。
- * 放行：`&&`（全成功才 0，不掩错）、重定向（不改退出码）、`2>&1`（& 后非空白）、
- * 管道带 `set -o pipefail && ` 前缀（退出码取最右非零，长输出截断如 `… | tail` 不再被一刀切）。
+ * 恒真式/平凡命令审计（T38/A1① + 证据强制 II + E2E 反馈 v2，纯函数）：能抹掉真实退出码的命令一律拒绝。
+ * 拒绝：`||`、`;`、换行、`$(...)`、反引号、行首 `!` 取反、末尾单 `&` 后台、平凡命令（`true`/`:`/`pwd`/`exit 0`/`echo …`）、
+ * 管道末段是恒 0 变换器（head/tail/tee/wc/sort 等——掩上游失败）。
+ * 放行：`&&`、重定向、`2>&1`、**末段可断言的管道**（grep/test/diff/jq/awk…——`cat f | grep -q x` 是合法验收，
+ * E2E 实测模型自然写法，v1 一刀切拒管道致 VERIFY 无法通过烧尽预算）、`set -o pipefail && ` 前缀任意管道。
  */
 export function masksExitCode(cmd: string): boolean {
   const c = cmd.trim();
   if (c.startsWith("!")) return true;
   if (/[\n;]/.test(c)) return true;
-  if (c.includes("$(") || c.includes("`")) return true;
+  if (c.includes("$(") || c.includes("`")) {
+    // E2E 反馈 v3：`test "$(cmd)" = "expected"` 是合法内容断言——test 退出码即断言结果，
+    // 替换目标失败会传染（空串≠期望）；仅放行 test/[ 包裹形态，其余 $()（结果被忽略/回显）仍拒
+    return !/^(test|\[\[?\s)/.test(c);
+  }
   if (/(^|[^&])&(?=\s|$)/.test(c)) return true;
   if (c.includes("|")) {
     if (c.includes("||")) return true;
-    return !/^set -o pipefail && /.test(c); // 管道仅 pipefail 前缀放行
+    if (/^set -o pipefail && /.test(c)) return false; // 显式 pipefail 前缀：任意管道放行
+    const segments = c.split("|").map((s) => s.trim()).filter(Boolean);
+    const tail = segments.at(-1) ?? "";
+    return !PIPE_ASSERTIVE_TAIL.test(tail); // 末段断言→放行；末段变换器（恒 0）→拒
   }
   if (/^(true|:|pwd|exit( 0)?)$/i.test(c)) return true; // 平凡命令：恒 exit 0，验收语义为空
   if (/^echo(\s|$)/i.test(c)) return true;
@@ -339,8 +350,14 @@ export function crossCheckEvidence(
   pinned?: string[],
 ): { ok: boolean; note?: string } {
   if (claimed.length === 0 && !(state === "VERIFY" && pinned?.length)) return { ok: true };
-  const realByCmd = new Map<string, CommandEvidence>();
-  for (const r of real) realByCmd.set(normCmd(r.command), r); // 后写覆盖：同命令取最近一次
+  // E2E 反馈 v3：模型常以 `cd 路径 && 命令` 链式执行、自报裸命令——claimed 与真实命令相等，
+  // 或与真实命令任一 && 段精确相等，即视为对应执行（退出码比对链整体：链断则整体非 0，伪造仍 mismatch）
+  const matchesClaim = (claimed: string, realCmd: string): boolean => {
+    const cc = normCmd(claimed);
+    const rc = normCmd(realCmd);
+    if (rc === cc) return true;
+    return rc.split(" && ").some((seg) => seg === cc);
+  };
   if (state === "VERIFY") {
     for (const c of claimed) {
       if (masksExitCode(c.command)) return { ok: false, note: `验证命令含恒真式构造（拒绝）：${c.command}` };
@@ -353,13 +370,13 @@ export function crossCheckEvidence(
       }
     }
     for (const p of pinned ?? []) {
-      const r = realByCmd.get(normCmd(p));
+      const r = real.find((x) => matchesClaim(p, x.command));
       if (!r) return { ok: false, note: `固定验收命令未真实执行：${p}` };
       if (r.exitCode !== 0) return { ok: false, note: `固定验收命令未通过（exit ${r.exitCode}）：${p}` };
     }
   }
   for (const c of claimed) {
-    const r = realByCmd.get(normCmd(c.command));
+    const r = real.find((x) => matchesClaim(c.command, x.command));
     if (!r) {
       if (state === "VERIFY") return { ok: false, note: `证据无法机器复核（未见真实执行）：${c.command}` };
       continue;

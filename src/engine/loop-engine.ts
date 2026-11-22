@@ -42,15 +42,15 @@ export interface EngineDeps {
 const STATE_INSTRUCTIONS: Partial<Record<StateId, string>> = {
   CLARIFY: "澄清需求：就模糊点向用户提问（每行以 ❓ 开头），无问题则产出理解摘要",
   DESIGN: "写 design.md（动机与范围/技术方案/行为契约），保存到运行目录",
-  PLAN: "基于 design.md 写 tasks.md（原子任务清单，每任务含验收命令；验收命令须可失败——测试/构建/lint 等，echo/true/无 pipefail 管道等恒真式会被机器剔除）",
+  PLAN: "基于 design.md 写 tasks.md（原子任务清单，每任务含验收命令；验收命令须可失败——优先裸命令（npm test/grep -q/diff），管道末段须为可断言命令（grep/test/diff/jq 等），echo/true/$(…)/末段 head|tail 管道会被机器剔除）",
   IMPLEMENT: "按 tasks.md 逐任务实现（TDD：先红后绿），完成后在 tasks.md 勾销",
-  VERIFY: "运行项目验证命令（测试/构建/lint），逐条记录命令与 exit code",
+  VERIFY: "运行项目验证命令（测试/构建/lint），逐条记录命令与 exit code。证据纪律：evidence 只能包含本步用 bash 工具真实逐条执行的命令——用 read 查看文件不算执行（要看内容就跑 cat）；探索性复合命令（含 ; 或 || 或 $(）不要写进 evidence，需要验证就单独重跑该命令",
   REPRODUCE: "复现 bug：给出最小复现步骤与证据",
   ROOT_CAUSE: "定位根因：数据流追踪，给出证据链",
   FIX: "按根因修复（最小 diff，不顺手重构）",
   REVIEW: "审查变更：spec 符合度 + 代码质量两轴",
   RESEARCH: "调研并产出 conclusion.md（结论 + 依据 + 引用）",
-  DEBUG: "诊断 VERIFY 失败：重跑失败命令，定位根因与最小修复方案，写入运行目录 diagnosis-latest.md（修复态会自动读取）",
+  DEBUG: "诊断 VERIFY 失败：重跑失败命令，定位根因与最小修复方案，写入运行目录 diagnosis-latest.md（修复态会自动读取）。写完文件后必须继续在回复中给出 yaml 结果块结尾（ok/summary/artifacts/evidence），没有结果块即判失败",
   PRD: "写 prd.md（背景与目标/用户故事/验收标准/非目标/优先级），保存到运行目录",
 };
 
@@ -314,8 +314,9 @@ export class LoopEngine {
     if ((wt.created || rec.needsSetup) && setupCmd) {
       // 单写者原则：中断落账（stopped/needsSetup/事件）全部由本续体完成；stop() 引导期委托并等待本续体，
       // 否则 stop 与续体并发写 run.json（固定 tmp 名相撞 rename ENOENT）+ 重复发 run_stopped
-      const ac = this.setupAbort = new AbortController();
-      const done = this.setupDone = (async () => {
+      const ac = new AbortController();
+      this.setupAbort = ac;
+      const done = (async () => {
         let s: { code: number; out: string };
         try {
           s = await this.deps.git.setup(wt.path, setupCmd, ac.signal);
@@ -343,8 +344,9 @@ export class LoopEngine {
           from: "INIT", to: "INIT", event: "worktree_setup",
           note: s.code === 0 ? setupCmd : `引导失败(exit ${s.code})，resume 将重试：${s.out.slice(-140)}`,
         });
-        return false;
+          return false;
       })();
+      this.setupDone = done;
       try {
         return await done;
       } finally {
@@ -448,7 +450,7 @@ export class LoopEngine {
         const left = (rec.budget[state] ?? this.deps.config.budget) - 1;
         rec.budget[state] = left;
         await this.deps.ledger.writeRun(runDir, rec);
-        await this.deps.ledger.appendHistory(runDir, { ts: now(), from: state, to: state, event: "step_fail", budgetLeft: left });
+        await this.deps.ledger.appendHistory(runDir, { ts: now(), from: state, to: state, event: "step_fail", budgetLeft: left, note: result.summary.slice(0, 200) }); // E2E 暴露：失败原因必须落史（否则只能猜）
         this.#emit({ type: "budget_changed", runId, state, remaining: left });
         if (left <= 0) {
           rec.status = "stopped";
@@ -529,8 +531,9 @@ export class LoopEngine {
         preamble: this.deps.resources.preamble(),
         workingDir: def.needsWorktree && worktree ? worktree : this.deps.projectRoot,
         role: this.#roleFor(state),
-        // T38/A2：自报产物解析根——运行目录（design.md 等文档）与工作目录（IMPLEMENT 代码文件）皆合法
-        artifactRoots: [runDir, def.needsWorktree && worktree ? worktree : this.deps.projectRoot],
+        // T38/A2：自报产物解析根——运行目录（design.md 等文档）、工作目录（IMPLEMENT 代码文件）、
+        // 项目根（E2E v4：模型常自报 .genpi/runs/... 项目根相对路径，缺此根会误判产物不存在）
+        artifactRoots: [runDir, def.needsWorktree && worktree ? worktree : this.deps.projectRoot, this.deps.projectRoot],
         ...(verifyCommands?.length ? { verifyCommands } : {}),
       };
       const result = await this.deps.runner.run(spec, (e: StepEvent) => {
@@ -595,7 +598,7 @@ export class LoopEngine {
       if (existsSync(tasksPath)) {
         const pinned = extractAcceptanceCommands(readFileSync(tasksPath, "utf8")).filter((c) => !masksExitCode(c));
         if (pinned.length > 0) {
-          verifyPinned = ["# 固定验收命令（机器强制：无权自选/省略/替换，逐条真实执行并记录）", ...pinned.map((c) => `- ${c}`), "命令含 || / ; / 无 pipefail 的 | / $( 等恒真式或 echo/true 等平凡命令会被机器拒绝（管道需 `set -o pipefail && ` 前缀）；每条验收命令真实 exit code 必须为 0。"].join("\n");
+          verifyPinned = ["# 固定验收命令（机器强制：无权自选/省略/替换，逐条真实执行并记录）", ...pinned.map((c) => `- ${c}`), "命令要求：优先裸命令或末段可断言的管道（grep/test/diff/jq/awk 等）；机器拒绝 ||、;、$(…)、echo/true、末段为 head/tail/tee/wc 等恒 0 变换器的管道（如需截断输出：`set -o pipefail && … | tail`）；每条验收命令真实 exit code 必须为 0。"].join("\n");
         }
       }
     }
