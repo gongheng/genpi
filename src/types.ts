@@ -75,7 +75,7 @@ export type EngineEvent =
   | { type: "budget_changed"; runId: RunId; state: StateId; remaining: number }
   | { type: "run_stopped"; runId: RunId; reason: string }
   | { type: "run_warning"; runId: RunId; /** 非致命警告上屏（如 pinned 验收命令被剔除）：需用户可见但不阻断循环 */ note: string }
-  | { type: "run_done"; runId: RunId; summary: string };
+  | { type: "run_done"; runId: RunId; summary: string; /** 全程 token 用量（日常手感#4：run 级成本总账） */ usage?: { input: number; output: number } };
 
 export interface RunRecord {
   id: RunId;
@@ -84,6 +84,8 @@ export interface RunRecord {
   title?: string;
   /** 风险分级（契约 20）：仅 feature 落账；旧 run 无此字段→按 t1 全链处理 */
   tier?: Tier;
+  /** 依赖引导未完成（中断/失败）：resume 时重试 setup 而非带着缺失 deps 烧 VERIFY 预算（日常手感#2） */
+  needsSetup?: boolean;
   request: string;
   status: "active" | "gate" | "stopped" | "done" | "rejected";
   currentState: StateId;

@@ -29,7 +29,7 @@ describe("门禁命令解析（聊天内 a/c/r）", () => {
 describe("输入分流（聊天单输入框的调度核心）", () => {
   const cases: [InputPhase, string | null, string, string][] = [
     ["idle", null, "加定时发布", "start"],
-    ["routing", null, "等等", "ignore"],
+    ["routing", null, "等等", "routing-queue"], // 日常手感#1：入队不丢字，路由完成后注入
     ["run", "r1", "把超时调大", "steer"],
     ["awaiting-answer", "r1", "是", "answer"],
     ["gate", "r1", "a", "gate"],
@@ -51,6 +51,10 @@ describe("输入分流（聊天单输入框的调度核心）", () => {
     expect(r.target).toBe("gate-hint");
     expect(r.hint).toContain("a 批准");
     expect(routeUserInput("idle", null, "   ").target).toBe("ignore");
+  });
+  it("⑦ routing 期输入 → routing-queue（入队不丢字，路由完成后注入）", () => {
+    expect(routeUserInput("routing", null, "补充：要支持手机端").target).toBe("routing-queue");
+    expect(routeUserInput("routing", null, "").target).toBe("ignore"); // 空输入仍忽略
   });
 });
 

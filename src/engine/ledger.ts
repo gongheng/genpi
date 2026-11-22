@@ -101,8 +101,9 @@ export function createFsLedger(now: () => Date = () => new Date()): Ledger {
     },
     async writeRun(runDir, rec) {
       // 原子写（P0）：先写 tmp 再 rename——writeFile 直接覆盖在写入中途被杀会留半截 JSON，
-      // 台账损坏则契约 7「进程随便杀重启即续」失效；rename 在 POSIX/Windows 上均原子替换
-      const tmp = join(runDir, "run.json.tmp");
+      // 台账损坏则契约 7「进程随便杀重启即续」失效；rename 在 POSIX/Windows 上均原子替换。
+      // tmp 带随机后缀：防并发写者同名相撞（一个 rename 掉另一个的 tmp → ENOENT，自审发现）
+      const tmp = join(runDir, `run.json.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}.tmp`);
       await writeFile(tmp, JSON.stringify(rec, null, 2));
       await rename(tmp, join(runDir, "run.json"));
     },

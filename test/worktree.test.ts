@@ -305,4 +305,15 @@ describe("worktree + MR", () => {
     expect(r3.mode).toBe("mr");
     expect(cmds.some((c) => c.includes("pr create"))).toBe(true);
   });
+
+  it("⑪ 日常手感#2 createShellExec 支持 AbortSignal：杀长命令即刻返回非零，不再干等", async () => {
+    const exec = createShellExec();
+    const ac = new AbortController();
+    const t0 = Date.now();
+    const p = exec(tmpdir(), "sleep 5", ac.signal);
+    setTimeout(() => ac.abort(), 60);
+    const r = await p;
+    expect(r.code).not.toBe(0);
+    expect(Date.now() - t0).toBeLessThan(2000); // 立即终止（而非等满 5s）
+  });
 });

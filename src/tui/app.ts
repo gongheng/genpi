@@ -11,6 +11,7 @@ import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding
 import type { EngineEvent, GateDecision, PathId, StepRunner } from "../types";
 import { applyDataRoot } from "../config";
 import { bootstrap } from "../engine/bootstrap";
+import { fmtUsage } from "../engine/loop-engine";
 import { heuristicRoute, routeRequest } from "../router";
 import { applyDelta, createStepLiveState, cutBoundary, fmtRoute, fmtStepDigest, formatHistoryLines, gateHint, renderGateBlock, renderStepLiveView, renderWelcome } from "./screens";
 
@@ -66,7 +67,7 @@ export function routeUserInput(
   input: string,
   hasPendingResume = false,
 ): {
-  target: "answer" | "gate" | "gate-hint" | "start" | "steer" | "resume" | "ignore";
+  target: "answer" | "gate" | "gate-hint" | "start" | "steer" | "resume" | "routing-queue" | "ignore";
   gateCommand?: GateCommand;
   hint?: string;
 } {
@@ -78,7 +79,9 @@ export function routeUserInput(
     if (!command) return { target: "gate-hint", hint };
     return { target: "gate", gateCommand: command };
   }
-  if (phase === "routing") return { target: "ignore", hint: "正在路由，请稍候…" };
+  // routing 期输入入队（日常手感#1）：等路由那几秒打的字不丢——路由完成后注入
+  // （工作路径→steering；chat→followUp 后续消息）
+  if (phase === "routing") return { target: "routing-queue" };
   // v1.7：空闲且有未完循环时，「继续」优先于新需求（新需求走 start 自动搁置）
   if (phase === "idle" && !currentRunId && hasPendingResume && /^(继续|continue|resume|续跑)$/i.test(text)) {
     return { target: "resume" };
@@ -113,6 +116,8 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
   let answerResolver: ((a: string) => void) | null = null;
   /** 上次中断的活跃 run（打开时提示，不自动复活；continue 续跑 / 新需求自动搁置，v1.7） */
   let pendingResume: string | null = null;
+  /** routing 期输入缓冲（日常手感#1）：等路由那几秒打的字不丢——路由完成后注入 */
+  let routingBuffer: string[] = [];
   let uiRef: ExtensionUIContext | null = null;
   let apiRef: ExtensionAPI | null = null;
   let live = createStepLiveState();
@@ -126,6 +131,12 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
   }
   function status(text: string | undefined): void {
     uiRef?.setStatus("genpi", text);
+  }
+  // 日常手感#3：footer 常显状态+预算余量（进入新状态重置，budget_changed 刷新——VERIFY 循环不再盲猜还剩几次）
+  let footerState = "";
+  let footerBudget = "";
+  function refreshFooter(): void {
+    status(`${currentPath} · ${footerState}${footerBudget ? ` · ${footerBudget}` : ""}`);
   }
   function scheduleWidget(): void {
     if (widgetTimer) return; // 合帧：高频 delta 合并为每 80ms 一次重绘
@@ -191,8 +202,16 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
       case "state_entered":
         endStreamWidget();
         live = createStepLiveState(e.state);
-        // T26：状态行不进聊天流——footer(setStatus) 与 widget 标题已实时显示，聊天流只留需要用户在场的节点
-        status(`${currentPath} · ${e.state}`);
+        // T26：状态行不进聊天流——footer(setStatus) 与 widget 标题已实时显示，聊天流只留需要用户在场的节点；
+        // 日常手感#3：footer 常显预算余量（进入新状态重置，扣减时刷新——VERIFY 循环时不再盲猜还剩几次）
+        footerState = e.state;
+        footerBudget = "";
+        refreshFooter();
+        break;
+      case "budget_changed":
+        // 日常手感#3：预算扣减实时上 footer（config.budget - remaining 即已耗次数）
+        footerBudget = `预算余 ${e.remaining}`;
+        refreshFooter();
         break;
       case "step_stream":
         pushLive("text", e.delta);
@@ -212,7 +231,7 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
         break;
       case "run_done":
         endStreamWidget();
-        say(`✔ ${cutBoundary(e.summary, 80)}`); // T34：完成行带要点（结论即交付的路径），边界截断防切半句
+        say(`✔ ${cutBoundary(e.summary, 80)}${e.usage ? `（全程 ${fmtUsage(e.usage)}）` : ""}`); // T34 要点 + 日常手感#4：全程成本总账
         status(undefined);
         void captureLastDone(e.runId); // 契约 24：记最近完成轮，供下一轮 followUp 承接
         currentRunId = null;
@@ -304,6 +323,7 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
   // （程序化发送，不触发 input 事件），路由全程不再吊住 pi 主循环。
   async function beginRun(request: string): Promise<void> {
     phase = "routing";
+    routingBuffer = []; // 新一轮路由：缓冲清零（旧残留不跨轮）
     status("路由中…");
     try {
       // T36：回显先行——路由要等模型（数秒），先让用户看到自己的输入，不再「被吞一会儿才出现」；
@@ -323,6 +343,11 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
         void Promise.resolve(apiRef?.sendUserMessage(route.text, { deliverAs: "followUp" })).catch((e) => {
           say(`⚠ ${String(e)}`);
         });
+        // routing 期缓冲的输入：作为后续消息排队补发（不丢字）
+        for (const t of routingBuffer) {
+          void Promise.resolve(apiRef?.sendUserMessage(t, { deliverAs: "followUp" })).catch((e) => say(`⚠ ${String(e)}`));
+        }
+        routingBuffer = [];
         return;
       }
       if (likelyChat) apiRef?.appendEntry("genpi/user", { text: `› ${request}` }); // 模型判为工作但启发式判闲聊：补回显
@@ -345,12 +370,16 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
       void engine
         .start(currentPath, route.text, (id) => {
           currentRunId = id;
+          // routing 期缓冲的输入：工作路径→steering 注入（runId 已建，首步指令即携带）
+          for (const t of routingBuffer) engine.steer(id, t);
+          routingBuffer = [];
         }, { tier: route.tier, waiveClarify: route.waive, waiveReason: route.reason, title: route.title, parentRunId: route.followUp && lastDone ? lastDone.runId : undefined, routeBy: route.by, routeReason: route.reason })
         .catch((e) => {
           say(`⚠ ${String(e)}`);
           currentRunId = null;
           phase = "idle";
           status(undefined);
+          routingBuffer = []; // 启动失败：缓冲随错丢弃（错误已上屏）
         });
     } catch (e) {
       say(`⚠ ${String(e)}`);
@@ -530,6 +559,11 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
           break;
         case "steer":
           if (currentRunId) engine.steer(currentRunId, text);
+          break;
+        case "routing-queue":
+          // 路由中：入队不丢字（回显+瞬时提示），路由完成后统一注入
+          routingBuffer.push(text);
+          ctx.ui.notify("已记录，路由完成后注入", "info");
           break;
         case "ignore":
           if (r.hint) ctx.ui.notify(r.hint, "info");

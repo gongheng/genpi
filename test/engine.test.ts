@@ -787,4 +787,88 @@ describe("IMPLEMENT 逐任务循环", () => {
       expect(w.events.some((e) => e.type === "run_stopped")).toBe(true);
     }
   });
+
+  it("㉟ 日常手感#2 依赖引导可中断：escape 杀引导置 stopped（needsSetup 落账），resume 重试引导；stop 期不重复发事件", async () => {
+    // 场景一：引导挂起时 ESC（纯 abort）——杀命令、置 stopped、needsSetup=true；resume 重试引导成功进 GATE
+    {
+      const w = makeWorld((spec) => (spec.state === "DESIGN" ? { result: ok(["design.md"]) } : { result: ok() }));
+      w.config.worktreeSetup = "npm ci";
+      const setupCalls: number[] = [];
+      let mode: "hang" | "ok" = "hang";
+      w.deps.git = {
+        ...w.deps.git,
+        async setup(_dir, _cmd, signal) {
+          setupCalls.push(setupCalls.length);
+          if (mode === "ok") return { code: 0, out: "" };
+          return await new Promise((resolve) => {
+            if (signal?.aborted) return resolve({ code: 1, out: "aborted" });
+            signal?.addEventListener("abort", () => resolve({ code: 1, out: "aborted" }));
+          });
+        },
+      };
+      const engine = new LoopEngine(w.deps);
+      let runId = "";
+      const p = engine.start("feature", w.request, (id) => (runId = id));
+      await vi.waitFor(() => expect(setupCalls).toHaveLength(1)); // 引导挂起中
+      expect(engine.abort()).toBe(true); // 引导期 ESC：受理（不再是「干等几分钟」）
+      const rid = await p; // start 正常返回（不进 drive）
+      expect(rid).toBe(runId);
+      const rec = JSON.parse(readFileSync(join(w.projectRoot, ".genpi", "runs", runId, "run.json"), "utf8"));
+      expect(rec.status).toBe("stopped");
+      expect(rec.needsSetup).toBe(true); // resume 将重试引导
+      const hist = readFileSync(join(w.projectRoot, ".genpi", "runs", runId, "phase-history.jsonl"), "utf8");
+      expect(hist).toContain("setup_aborted");
+      expect(w.events.some((e) => e.type === "run_stopped" && String((e as { reason?: string }).reason).includes("依赖引导被中断"))).toBe(true);
+      // resume：引导重试成功 → needsSetup 消费 → 一路走到 GATE_DESIGN
+      mode = "ok";
+      await new LoopEngine(w.deps).resume(runId);
+      expect(setupCalls).toHaveLength(2); // 引导重试过
+      const rec2 = JSON.parse(readFileSync(join(w.projectRoot, ".genpi", "runs", runId, "run.json"), "utf8"));
+      expect(rec2.needsSetup).toBeUndefined();
+      expect(rec2.status).toBe("gate");
+    }
+    // 场景二：引导挂起时 /genpi-stop——stop 发过 run_stopped，setup 分支不重复发
+    {
+      const w2 = makeWorld(() => ({ result: ok() }));
+      w2.config.worktreeSetup = "npm ci";
+      const calls: number[] = [];
+      w2.deps.git = {
+        ...w2.deps.git,
+        async setup(_dir, _cmd, signal) {
+          calls.push(calls.length);
+          return await new Promise((resolve) => {
+            if (signal?.aborted) return resolve({ code: 1, out: "aborted" });
+            signal?.addEventListener("abort", () => resolve({ code: 1, out: "aborted" }));
+          });
+        },
+      };
+      const engine = new LoopEngine(w2.deps);
+      let rid2 = "";
+      const p2 = engine.start("feature", "stop 场景", (id) => (rid2 = id));
+      await vi.waitFor(() => expect(calls).toHaveLength(1));
+      await engine.stop(rid2);
+      await p2;
+      const rec = JSON.parse(readFileSync(join(w2.projectRoot, ".genpi", "runs", rid2, "run.json"), "utf8"));
+      expect(rec.status).toBe("stopped");
+      expect(rec.needsSetup).toBe(true);
+      expect(w2.events.filter((e) => e.type === "run_stopped")).toHaveLength(1); // stop 的那条，无重复
+    }
+  });
+
+  it("㊱ 日常手感#4 run_done 携带全程用量总账（跨状态聚合）", async () => {
+    // research 单步：run_done.usage = 该步用量
+    const w = makeWorld((spec) => ({ result: { ...ok(), usage: { input: spec.state === "RESEARCH" ? 1500 : 100, output: 200 } } }));
+    await new LoopEngine(w.deps).start("research", "调研用量");
+    const done = w.events.find((e) => e.type === "run_done") as { usage?: { input: number; output: number } };
+    expect(done?.usage).toEqual({ input: 1500, output: 200 });
+    // T0 短链跨状态：IMPLEMENT(300/40) + VERIFY(700/90) 累加 → GATE_MR 批准后 done
+    const w2 = makeWorld((spec) => ({
+      result: { ...ok(), usage: { input: spec.state === "IMPLEMENT" ? 300 : 700, output: spec.state === "IMPLEMENT" ? 40 : 90 } },
+    }));
+    const eng = new LoopEngine(w2.deps);
+    const rid = await eng.start("feature", "微改动", undefined, { tier: "t0" });
+    await eng.decide(rid, { kind: "approve" }); // 过 GATE_MR → ARCHIVE → DONE
+    const done2 = w2.events.find((e) => e.type === "run_done") as { usage?: { input: number; output: number } };
+    expect(done2?.usage).toEqual({ input: 1000, output: 130 });
+  });
 });

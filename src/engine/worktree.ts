@@ -10,12 +10,12 @@ export interface ExecResult {
   code: number;
   out: string;
 }
-export type ExecFn = (cwd: string, cmd: string) => Promise<ExecResult>;
+export type ExecFn = (cwd: string, cmd: string, signal?: AbortSignal) => Promise<ExecResult>;
 
 export function createShellExec(): ExecFn {
-  return async (cwd, cmd) => {
+  return async (cwd, cmd, signal) => {
     try {
-      const { stdout, stderr } = await pexec(cmd, { cwd, encoding: "utf8" });
+      const { stdout, stderr } = await pexec(cmd, { cwd, encoding: "utf8", ...(signal ? { signal } : {}) });
       return { code: 0, out: stdout + stderr };
     } catch (e) {
       const err = e as { code?: number; stdout?: string; stderr?: string };
@@ -55,8 +55,8 @@ export function createGitOps(exec: ExecFn, opts: GitOpsOptions = {}): GitOps {
       throw new Error(`worktree 创建失败: ${r.out}`);
     },
 
-    async setup(worktreeDir, command) {
-      const r = await exec(worktreeDir, command);
+    async setup(worktreeDir, command, signal) {
+      const r = await exec(worktreeDir, command, signal);
       return { code: r.code, out: r.out };
     },
 

@@ -16,8 +16,8 @@ export interface ResourceProvider {
 
 export interface GitOps {
   ensureWorktree(projectRoot: string, runId: string, branchPrefix: string, worktreeDir: string): Promise<{ path: string; baseSha?: string; created: boolean }>;
-  /** T38/C4：worktree 新建后依赖引导（如 npm ci）；失败由引擎告警不阻塞 */
-  setup(worktreeDir: string, command: string): Promise<{ code: number; out: string }>;
+  /** T38/C4：worktree 新建后依赖引导（如 npm ci）；失败由引擎告警不阻塞；signal 支持中断（日常手感#2：引导期 escape/stop 可断） */
+  setup(worktreeDir: string, command: string, signal?: AbortSignal): Promise<{ code: number; out: string }>;
   mrPreview(worktreeDir: string, baseSha?: string): Promise<string | null>;
   pushAndMr(worktreeDir: string, opts: { mrTarget: string; runId: string; summary: string; bodyFile?: string }): Promise<{ mode: "mr" | "manual"; url: string }>;
 }
@@ -66,6 +66,9 @@ export class LoopEngine {
   private lastSum = new Map<RunId, string>(); // 末步工作态摘要（T34）：实例级——GATE 批准后重新 drive 不清零（局部变量曾致 run_done/会话摘要丢要点）
   private pendingAbort = false; // 会话间隙（建会话/Q&A 等待）收到的中断，下一 step 前消费（契约 19）
   private driving: RunId | null = null; // 当前 drive 循环所属 run：中断仅对活跃循环生效，防跨 run 泄漏毒死新 run
+  private setupAbort: AbortController | null = null; // 依赖引导（worktreeSetup）执行中的中断控制器（日常手感#2）
+  private setupDone: Promise<boolean> | null = null; // 引导续体（含中断落账）——stop 委托给它并等待，保证单写者
+  private runUsage = new Map<RunId, { input: number; output: number }>(); // 全程用量聚合（日常手感#4：run_done 携带总账）
 
   constructor(private deps: EngineDeps) {}
 
@@ -74,6 +77,12 @@ export class LoopEngine {
   #emit(e: EngineEvent): void {
     if (e.type === "run_done" || e.type === "run_stopped") {
       void this.deps.ledger.releaseActive(this.deps.projectRoot, e.runId).catch(() => {});
+      // 终态回收 per-run 内存（卫生项：长会话多 run 不泄漏；resume 需要的上下文均从台账重建——契约 7/E7）
+      this.steering.delete(e.runId);
+      this.qa.delete(e.runId);
+      this.lastSum.delete(e.runId);
+      this.parentCtx.delete(e.runId);
+      this.runUsage.delete(e.runId);
     }
     this.deps.emit(e);
   }
@@ -133,7 +142,8 @@ export class LoopEngine {
     onCreated?.(runId); // runId 在 drive 前即回调：调用方（TUI）在初始 drive 期间即可响应 escape/steering
     if (def.needsWorktree) {
       try {
-        await this.#ensureRunWorktree(runId, runDir, rec, def);
+        // 引导被用户中断：run 已置 stopped（setup_aborted 落史），不进 drive
+        if (await this.#ensureRunWorktree(runId, runDir, rec, def)) return runId;
       } catch (e) {
         // 失败不留孤儿 active（会卡死后续 start），也不让 drive 回落主树实施（违反契约 5）——置 stopped 留 resume 出路
         await this.#stopForWorktreeFailure(runId, runDir, rec, e);
@@ -162,11 +172,12 @@ export class LoopEngine {
     // 契约 15：resume 同样占位——另一 run 活跃时拒绝；自持占位幂等（崩溃后锁仍在，指向本 run）
     await this.#acquireOrStop(runId, runDir);
     // 契约 5（P0 补全）：终态检查/占位之后才补 worktree——要驱动了才动 git，
-    // 否则 resume 一个已终态且 worktree 已被 clean 的 run 会先白建 worktree+分支再抛「不可恢复」
-    if (def.needsWorktree && (!rec.worktree || !existsSync(rec.worktree))) {
+    // 否则 resume 一个已终态且 worktree 已被 clean 的 run 会先白建 worktree+分支再抛「不可恢复」；
+    // needsSetup（上次引导中断/失败）同样进入：重试引导而非带着缺失 deps 烧预算
+    if (def.needsWorktree && (rec.needsSetup || !rec.worktree || !existsSync(rec.worktree))) {
       rec.worktree = undefined;
       try {
-        await this.#ensureRunWorktree(runId, runDir, rec, def);
+        if (await this.#ensureRunWorktree(runId, runDir, rec, def)) return; // 引导又被中断：已置 stopped
       } catch (e) {
         await this.#stopForWorktreeFailure(runId, runDir, rec, e);
         throw e;
@@ -206,7 +217,7 @@ export class LoopEngine {
       rec.status = "rejected";
       await this.deps.ledger.writeRun(runDir, rec);
       await this.#logConversation(runId, rec.path, rec.request, "rejected", "人工终止（产物保留）");
-      this.#emit({ type: "run_done", runId, summary: "人工终止（产物保留）" });
+      this.#emit({ type: "run_done", runId, summary: "人工终止（产物保留）", ...(this.runUsage.get(runId) ? { usage: this.runUsage.get(runId) } : {}) });
       return;
     }
     if (d.kind === "request_changes") {
@@ -255,8 +266,9 @@ export class LoopEngine {
   /** 契约 19：中断当前在跑的 step（escape）：StepResult.aborted，不扣 budget，run 转 stopped 可续跑。会话间隙收到时置 pendingAbort，下一 step 前生效。
    * 返回是否有活跃循环受理（false=启动窗口如 worktree 依赖引导，无步骤可断——展示层可提示改走 /genpi-stop）。 */
   abort(): boolean {
-    const accepted = this.driving !== null;
-    if (accepted) this.pendingAbort = true; // 仅当有活跃 drive 循环：否则置位无人消费，会毒死下一个 run（1607 回归）
+    const accepted = this.driving !== null || this.setupAbort !== null;
+    if (this.driving) this.pendingAbort = true; // 仅当有活跃 drive 循环：否则置位无人消费，会毒死下一个 run（1607 回归）
+    this.setupAbort?.abort(); // 引导期中断：杀引导命令（#ensureRunWorktree 检测后置 stopped），不再干等几分钟
     this.deps.runner.abort?.();
     return accepted;
   }
@@ -266,6 +278,14 @@ export class LoopEngine {
     const runDir = await this.deps.ledger.runDir(this.deps.projectRoot, runId);
     const rec = await this.deps.ledger.readRun(runDir);
     if (rec.status !== "active" && rec.status !== "gate") return;
+    // 引导期 stop（单写者原则，日常手感#2）：杀引导命令后委托给引导续体落账
+    // （stopped/needsSetup/run_stopped 事件全由续体一次性完成），并等它完成——
+    // 否则 stop 与续体并发写 run.json（tmp 相撞）+ 重复发事件
+    if (this.setupAbort) {
+      this.setupAbort.abort();
+      await this.setupDone?.catch(() => {});
+      return;
+    }
     if (this.driving === runId) {
       // 仅当该 run 的 drive 循环仍在时置位/打断（无循环的 stop 不得留下毒标志）
       this.pendingAbort = true;
@@ -279,22 +299,59 @@ export class LoopEngine {
   }
 
   /** 契约 5：代码路径必须有隔离 worktree（start/resume 共用）。缺失时补建；成功后落账。 */
-  async #ensureRunWorktree(runId: RunId, runDir: string, rec: RunRecord, def: PathDef): Promise<void> {
-    if (!def.needsWorktree || rec.worktree) return;
+  /** 返回 true=依赖引导被用户中断（run 已置 stopped，调用方不进 drive）。 */
+  async #ensureRunWorktree(runId: RunId, runDir: string, rec: RunRecord, def: PathDef): Promise<boolean> {
+    if (!def.needsWorktree) return false;
+    if (rec.worktree && !rec.needsSetup) return false; // needsSetup：上次引导中断/失败，重试（deps 不完整不可直接用）
     const wt = await this.deps.git.ensureWorktree(this.deps.projectRoot, runId, this.deps.config.branchPrefix, this.deps.config.worktreeDir);
     rec.worktree = wt.path;
     rec.baseSha = wt.baseSha;
     await this.deps.ledger.writeRun(runDir, rec);
     // T38/C4：新 worktree 无 gitignored 依赖（node_modules 等）——首次创建后跑用户配置的引导命令，
-    // 否则第一次 VERIFY 必白烧一轮 budget + DEBUG 循环才发现「依赖没装」；失败告警不阻塞（网络抖动不该拦死循环）
-    if (wt.created && this.deps.config.worktreeSetup) {
-      const s = await this.deps.git.setup(wt.path, this.deps.config.worktreeSetup);
-      await this.deps.ledger.appendHistory(runDir, {
-        ts: now(),
-        from: "INIT", to: "INIT", event: "worktree_setup",
-        note: s.code === 0 ? this.deps.config.worktreeSetup : `引导失败(exit ${s.code})，后续验证可能因依赖缺失失败：${s.out.slice(-140)}`,
-      });
+    // 否则第一次 VERIFY 必白烧一轮 budget + DEBUG 循环才发现「依赖没装」；失败告警不阻塞（网络抖动不该拦死循环）。
+    // 日常手感#2：引导可中断（AbortSignal——escape/stop 杀命令而非干等几分钟）；中断/失败记 needsSetup，resume 重试
+    const setupCmd = this.deps.config.worktreeSetup; // 捕获窄化：IIFE 新作用域会丢外层 if 的收窄
+    if ((wt.created || rec.needsSetup) && setupCmd) {
+      // 单写者原则：中断落账（stopped/needsSetup/事件）全部由本续体完成；stop() 引导期委托并等待本续体，
+      // 否则 stop 与续体并发写 run.json（固定 tmp 名相撞 rename ENOENT）+ 重复发 run_stopped
+      const ac = this.setupAbort = new AbortController();
+      const done = this.setupDone = (async () => {
+        let s: { code: number; out: string };
+        try {
+          s = await this.deps.git.setup(wt.path, setupCmd, ac.signal);
+        } finally {
+          this.setupAbort = null;
+        }
+        if (ac.signal.aborted) {
+          const nowRec = await this.deps.ledger.readRun(runDir);
+          nowRec.needsSetup = true;
+          if (nowRec.status === "active") {
+            nowRec.status = "stopped"; // 纯 escape/stop 委托路径：由本续体单写者落账
+            await this.deps.ledger.writeRun(runDir, nowRec);
+            this.#emit({ type: "run_stopped", runId, reason: "依赖引导被中断（run 已转 stopped，可 --resume 续跑，续跑将重试引导）" });
+          } else {
+            await this.deps.ledger.writeRun(runDir, nowRec); // 其余终态（如已 rejected）：仅补 needsSetup
+          }
+          await this.deps.ledger.appendHistory(runDir, { ts: now(), from: rec.currentState, to: rec.currentState, event: "setup_aborted", note: "依赖引导被用户中断（resume 重试）" });
+          await this.#logConversation(runId, rec.path, rec.request, "stopped", "依赖引导被中断");
+          return true;
+        }
+        rec.needsSetup = s.code === 0 ? undefined : true; // 失败也记：resume 重试而非白烧 VERIFY 预算
+        await this.deps.ledger.writeRun(runDir, rec);
+        await this.deps.ledger.appendHistory(runDir, {
+          ts: now(),
+          from: "INIT", to: "INIT", event: "worktree_setup",
+          note: s.code === 0 ? setupCmd : `引导失败(exit ${s.code})，resume 将重试：${s.out.slice(-140)}`,
+        });
+        return false;
+      })();
+      try {
+        return await done;
+      } finally {
+        this.setupDone = null;
+      }
     }
+    return false;
   }
 
   /** worktree 补建失败：置 stopped（防孤儿 active 卡死后续 start）+ 落史 + run_stopped，留 --resume 出路。 */
@@ -336,7 +393,7 @@ export class LoopEngine {
         await this.deps.ledger.writeRun(runDir, rec);
         await this.deps.ledger.appendHistory(runDir, { ts: now(), from: "ARCHIVE", to: "DONE", event: "run_done" });
         await this.#logConversation(runId, rec.path, rec.request, "done", this.lastSum.get(runId) ?? "");
-        this.#emit({ type: "run_done", runId, summary: this.lastSum.get(runId) || "循环完成" }); // T34：带末步要点（结论即交付的路径尤其需要）
+        this.#emit({ type: "run_done", runId, summary: this.lastSum.get(runId) || "循环完成", ...(this.runUsage.get(runId) ? { usage: this.runUsage.get(runId) } : {}) }); // T34：带末步要点（结论即交付的路径尤其需要） // 日常手感#4：全程用量总账
         continue;
       }
       if (state === "DONE") {
@@ -344,7 +401,7 @@ export class LoopEngine {
         await this.deps.ledger.writeRun(runDir, rec);
         await this.deps.ledger.appendHistory(runDir, { ts: now(), from: "DONE", to: "DONE", event: "run_done" });
         await this.#logConversation(runId, rec.path, rec.request, "done", this.lastSum.get(runId) ?? "");
-        this.#emit({ type: "run_done", runId, summary: this.lastSum.get(runId) || "循环完成" }); // T34：同上
+        this.#emit({ type: "run_done", runId, summary: this.lastSum.get(runId) || "循环完成", ...(this.runUsage.get(runId) ? { usage: this.runUsage.get(runId) } : {}) }); // T34：同上 // 日常手感#4：全程用量总账
         continue;
       }
       const gate = def.gates[state];
@@ -371,6 +428,11 @@ export class LoopEngine {
       }
       if (result.ok) {
         this.lastSum.set(runId, result.summary);
+        if (result.usage) {
+          // 日常手感#4：全程用量聚合（IMPLEMENT 多任务已在 #runWorkState 合并；此处按状态累加）
+          const u = this.runUsage.get(runId) ?? { input: 0, output: 0 };
+          this.runUsage.set(runId, { input: u.input + result.usage.input, output: u.output + result.usage.output });
+        }
         // T38/B3：契约 6 是「连续失败」语义——成功即重置该态 budget（VERIFY 例外见下）；
         // 旧实现 per-state 终身累计：IMPLEMENT 8 任务跨任务掽 3 次即 STOP，与契约 6 措辞不符。
         // VERIFY 不重置（其成功即离态，重置无意义——保留累计恰恰实现契约 23「fail budget 为诊断循环封顶」）

@@ -110,7 +110,7 @@
 ```bash
 # 源码开发
 npm install && npm run build && npm link
-npm test                     # 129 用例（引擎/路由/风险分级/证据强制/TUI 纯函数/E2E/扩展），全 mock 无需凭证（⑮ 为真实 SDK 事件形状钉子，无模型）
+npm test                     # 133 用例（引擎/路由/风险分级/证据强制/TUI 纯函数/E2E/扩展），全 mock 无需凭证（⑮ 为真实 SDK 事件形状钉子，无模型）
 npm run check:resources      # 方法论无项目耦合残留
 
 # 体验（无模型凭证也能看交互）
@@ -131,7 +131,8 @@ TUI 内交互速查：
 | `继续` / `continue` / `resume` | 续跑挂起的旧循环（stopped/gate 均可，v1.7/v1.8） |
 | `a` / `c <意见>` / `r` / `p` | 门禁期：批准/要求修改/终止/预览审批对象（聊天命令，防误触） |
 | 运行中输入任意文字 | steering：下一 step 边界注入，不跳状态不扣预算 |
-| `escape` | 中断当前步骤（不扣预算，run 转 stopped 可续跑）。**run 相位全程生效**——等首 token/建会话/长工具调用/任务间隙等无流式窗口也可中断；Q&A 等待期同样生效；**兼容 Kitty 键盘协议终端**（ESC 是 `\x1b[27u` 非裸 `\x1b`，经 pi-tui matchesKey 判定——旧裸字节比法在 Kitty/WezTerm/Ghostty/新版 iTerm 下完全死键）。启动窗口（worktree 依赖引导执行中）无步骤可断，提示改走 `/genpi-stop` |
+| 路由中输入 | 入队不丢字（日常手感#1）：路由完成后自动注入——工作路径→steering 携带，闲聊→补发后续消息 |
+| `escape` | 中断当前步骤（不扣预算，run 转 stopped 可续跑）。**run 相位全程生效**——等首 token/建会话/长工具调用/任务间隙等无流式窗口也可中断；Q&A 等待期同样生效；**依赖引导（如 npm ci）执行中也能杀命令**（AbortSignal，置 stopped 且 resume 重试引导——日常手感#2）；**兼容 Kitty 键盘协议终端**（ESC 是 `\x1b[27u` 非裸 `\x1b`，经 pi-tui matchesKey 判定——旧裸字节比法在 Kitty/WezTerm/Ghostty/新版 iTerm 下完全死键） |
 | `/genpi-stop` | 废弃当前 run（台账保留） |
 | `/genpi log [n]` | 当前/最近 run 转移史尾部（路由/推进/预算/诊断留痕，T30） |
 | `/model` `/theme` 等 | pi 原生命令照常可用 |
@@ -190,7 +191,7 @@ while (rec.status === "active") {
 └── runs/
     ├── active.lock            # 单活跃占位（wx 原子创建：start/resume 获取，终态释放，崩溃残留/终态自动接管）
     └── <runId>/
-        ├── run.json           # { id, path, title?, tier?, request, status, currentState, budget, sessionIds, worktree?, baseSha?, parentRunId? }
+        ├── run.json           # { id, path, title?, tier?, request, status, currentState, budget, sessionIds, worktree?, baseSha?, needsSetup?, parentRunId? }
         ├── design.md / tasks.md / conclusion.md / prd.md / mr-body.md   # 各状态产物（GATE 审批对象；mr-body 为 MR 描述）
         └── phase-history.jsonl # append-only：{ ts, from, to, event, evidence?, budgetLeft?, note?, usage? }
 ```
@@ -239,16 +240,16 @@ feature/bugfix 在 `.worktrees/<runId>/` 建独立分支（前缀 `feature/`）�
 
 ---
 
-## 7. 测试地图（129 用例，全部无需真模型）
+## 7. 测试地图（133 用例，全部无需真模型）
 
 | 测试文件 | 覆盖 | 怎么 mock |
 | --- | --- | --- |
-| `engine.test.ts`（35） | ★drive 循环全语义：四路径转移/GATE 死等/budget 连续语义（交错重置）/request_changes 不扣/steering/resume（含承接重建与补建 worktree；终态不白建）/中断/Q&A 期间 stop/escape 逐问终止/搁置不毒死新 run/T0 短链/T2 注入/prd 循环/CLARIFY 豁免/标题落账/pinned 接线/worktreeSetup/用量落账/worktree 失败置 stopped/active.lock 原子单活跃/mr-body 富化 | StepRunner 全 mock（makeWorld） |
+| `engine.test.ts`（37） | ★drive 循环全语义：四路径转移/GATE 死等/budget 连续语义（交错重置）/request_changes 不扣/steering/resume（含承接重建与补建 worktree；终态不白建）/中断/Q&A 期间 stop/escape 逐问终止/**依赖引导可中断+needsSetup 重试（单写者防并发写台账）**/搁置不毒死新 run/T0 短链/T2 注入/prd 循环/CLARIFY 豁免/标题落账/pinned 接线/worktreeSetup/用量落账/**run_done 用量总账**/worktree 失败置 stopped/active.lock 原子单活跃/mr-body 富化 | StepRunner 全 mock（makeWorld） |
 | `step-runner.test.ts`（17） | SDK seam：注入装载/证据交叉校验（伪造 exitCode→fail）/恒真式+平凡命令审计拒绝与放行清单（含 pipefail 管道）/pinned 三情形/产物非空/用量聚合/**真实 SDK 事件形状钉子⑮（嵌套 bash 照发 tool_execution_*，exitCode 在 structuredContent.exit_code）**/services 缓存⑯/缺字段诊断⑰ | `setSessionFactoryForTest` |
-| `worktree.test.ts`（14） | 真实 git 仓：worktree 隔离/挂回既有分支/复用补 baseSha/mrPreview/提交完整性警告/planCleanup+executeCleanup（干跑与执行，未推送分支防丢保留；已删分支仅清 worktree）/pushAndMr body-file/平台匹配才走 gh | 玩具 git 仓/fake exec |
+| `worktree.test.ts`（15） | 真实 git 仓：worktree 隔离/挂回既有分支/复用补 baseSha/mrPreview/提交完整性警告/planCleanup+executeCleanup（干跑与执行，未推送分支防丢保留；已删分支仅清 worktree）/pushAndMr body-file/平台匹配才走 gh/AbortSignal 杀长命令 | 玩具 git 仓/fake exec |
 | `ledger.test.ts`（3） | 台账原子写：tmp+rename 无残留、后写为准；active.lock 原子占位（独占/接管/验主幂等）；conversation 裁剪（bounded 增长） | 临时目录 |
 | `e2e-headless.test.ts`（3） | 垂直切片：feature 全循环四件产物/push 降级/单活跃 | fake runner+玩具仓 |
-| `tui.test.ts` + `screens.test.ts`（21） | 纯函数：routeUserInput 分流/parseGateCommand/isEscapeInput（legacy+Kitty 协议）/escapeAction（run 相位全程可中断）/渲染（含用量展示） | 无 mock（纯函数） |
+| `tui.test.ts` + `screens.test.ts`（22） | 纯函数：routeUserInput 分流（含 routing-queue 入队）/parseGateCommand/isEscapeInput（legacy+Kitty 协议）/escapeAction（run 相位全程可中断）/渲染（含用量展示） | 无 mock（纯函数） |
 | `router/config/ext-manager/extensions/resources`（35） | 四分类路由/tier 启发式/豁免判定/标题生成/routerModel 穿插/三级配置（worktreeSetup、models.router）/扩展管理/装载/资源 | 各自 seam |
 
 测试哲学：**引擎 headless 可测是架构特性**——LoopEngine 不依赖 TUI，事件面（EngineEvent）即测试面；这也是"将来服务化的免费接缝"。
