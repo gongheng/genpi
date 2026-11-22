@@ -25,7 +25,7 @@
 
 读懂下面五个概念，就读懂了 genpi 的一半：
 
-1. **run**：一次需求交付的完整循环。唯一实体，台账落盘于 `<项目根>/.genpi/runs/<runId>/`（runId 形如 `20261031-1632-feature-add-login`）。同一项目同时**最多一个活跃 run**（契约 15）。
+1. **run**：一次需求交付的完整循环。唯一实体，台账落盘于 `<项目根>/.genpi/runs/<runId>/`（runId 形如 `20261031-1632-feature-add-login`）。同一项目同时**最多一个活跃 run**（契约 15，`active.lock` wx 原子占位：两实例并发 start/resume 不再双双通过）。
 2. **路径（path）× 状态机**：需求路由到四条路径之一（另设 chat 闲聊放行出口），每条路径是一张**纯数据转移表**（`src/engine/paths.ts`）：
 
    ```text
@@ -110,7 +110,7 @@
 ```bash
 # 源码开发
 npm install && npm run build && npm link
-npm test                     # 112 用例（引擎/路由/风险分级/证据强制/TUI 纯函数/E2E/扩展），全 mock 无需凭证
+npm test                     # 116 用例（引擎/路由/风险分级/证据强制/TUI 纯函数/E2E/扩展），全 mock 无需凭证
 npm run check:resources      # 方法论无项目耦合残留
 
 # 体验（无模型凭证也能看交互）
@@ -160,7 +160,7 @@ while (rec.status === "active") {
 四个易错细节（都有回归测试）：
 
 - **IMPLEMENT 是逐任务循环**：`#runWorkState` 用 `parseUnchecked()` 解析 tasks.md，**每个任务一次 StepRunner 调用**，完成一个 `tick()` 勾选一个并记 `task_done`（同时重置该态 budget——v1.10 连续失败语义；交错失败不误杀）；失败即返回由 drive 统一扣预算（engine.test ⑥⑦㉕）。
-- **VERIFY 是 pinned 驱动**（v1.10）：tasks.md 验收行（extractAcceptanceCommands，含已勾选任务——验证是全量回归）升格为固定验收命令注入 spec.verifyCommands；含恒真式的验收命令在引擎侧剔除并落史（verify_pin_dropped）。
+- **VERIFY 是 pinned 驱动**（v1.10）：tasks.md 验收行（extractAcceptanceCommands，含已勾选任务——验证是全量回归）升格为固定验收命令注入 spec.verifyCommands；含恒真式/平凡命令的验收命令在引擎侧剔除，落史（verify_pin_dropped）并以 run_warning 上屏（验收被削弱需用户可见）。
 - **中断标志生命周期绑定 drive 循环**（v1.8，1607 回归）：`driving` 记录当前循环的 runId，`abort()` 仅在有活跃循环时置 `pendingAbort`；drive 启动清零、finally 复位——否则搁置旧 run 的残留标志会毒死下一个 run 的第一步（engine.test ⑮⑯）。
 - **`start(onCreated?)` 回调在 drive 之前触发**：TUI 借此在初始 drive（CLARIFY/DESIGN…）期间就能响应 escape/steering，不会出现"第一步期间输入黑洞"。
 
@@ -177,7 +177,7 @@ while (rec.status === "active") {
 - **可测性**：`setSessionFactoryForTest()` 可注入 mock 会话，全部引擎测试无需真模型；
 - **会话构造**：`createAgentSessionServices` + `ModelRuntime`（按 agentDir 缓存免冷启动）+ `resolveCliModel` 解析角色模型；**codemode 工具显式装载+激活**（T39：SDK 会话默认连注册都没有——builtin 装载是 CLI 路径待遇；`createCodemodeExtension()` 入 extensionFactories + `setActiveToolsByName` 增量激活。沙箱脚本嵌套工具调用不进上下文，批量机械操作省 token；嵌套调用走同一工具管道，证据交叉校验照常生效）；
 - **模型三级优先**（契约 16）：`config.models[role]`（implementer/reviewer；另有 `models.router` 供路由分类用小快模型，降延迟与成本）> 交互会话当前模型（跟随 `/model`）> 全局默认；
-- **两阶段 done 的机器验证**（v1.6，契约 4）：收集会话内 `tool_execution_*` 真实 bash 执行记录，与模型自报 `evidence[].exitCode` **交叉校验**——VERIFY 态自报命令无真实执行对应、或 exitCode 不符 → 直接 fail（伪造证据）。这是"agent 宣称→机器验证"第二阶段的实现。v1.10 补强三件：①**恒真式审计** `masksExitCode`——VERIFY 自报命令含 `||`/`;`/`|`/`$(`/反引号/行首 `!`/末尾单 `&` 即 fail（`npm test || true` 骗不过；`&&`/重定向不掩错放行）；②**pinned 固定验收**——每条必须真实执行且 exit 0，模型无权自选/省略/替换；③**产物存在性** `checkArtifacts`——自报 artifacts 逐个在 artifactRoots（运行目录/工作目录/绝对路径）下 existsSync，未落盘进不了门禁（契约 4a）。
+- **两阶段 done 的机器验证**（v1.6，契约 4）：收集会话内 `tool_execution_*` 真实 bash 执行记录，与模型自报 `evidence[].exitCode` **交叉校验**——VERIFY 态自报命令无真实执行对应、或 exitCode 不符 → 直接 fail（伪造证据）。这是"agent 宣称→机器验证"第二阶段的实现。v1.10 补强三件：①**恒真式/平凡命令审计** `masksExitCode`——VERIFY 自报命令含 `||`/`;`/无 pipefail 的 `|`/`$(`/反引号/行首 `!`/末尾单 `&`/平凡命令（`echo`/`true`/`:`/`pwd` 等恒 exit 0）即 fail（`npm test || true` 骗不过；`&&`/重定向不掩错、`set -o pipefail `set -o pipefail && ` 前缀`set -o pipefail && ` 前缀`（注意尾随空格）管道放行）；②**pinned 固定验收**——每条必须真实执行且 exit 0，模型无权自选/省略/替换；③**产物存在且非空** `checkArtifacts`——自报 artifacts 逐个在 artifactRoots（运行目录/工作目录/绝对路径）下存在且非空，未落盘/空文件进不了门禁（契约 4a）。
 - **token 用量聚合**（契约 24a，v1.10）：订阅 `message_end`（assistant.usage）聚合 in/out → StepResult.usage → 事件与台账；失败重跑也计量（成本诚实）。
 
 ### 5.4 台账与产物（ledger.ts）
@@ -186,10 +186,12 @@ while (rec.status === "active") {
 <项目根>/.genpi/
 ├── config.json                # 可选项目级配置（mrTarget/branchPrefix/worktreeDir/worktreeSetup/budget/models+router）
 ├── conversation.md            # 会话滚动摘要（契约 24/E：每终态一行，新 run 注入最近 5 条背景）
-└── runs/<runId>/
-    ├── run.json               # { id, path, title?, tier?, request, status, currentState, budget, sessionIds, worktree?, baseSha?, parentRunId? }
-    ├── design.md / tasks.md / conclusion.md / prd.md   # 各状态产物（GATE 审批对象）
-    └── phase-history.jsonl    # append-only：{ ts, from, to, event, evidence?, budgetLeft?, note?, usage? }
+└── runs/
+    ├── active.lock            # 单活跃占位（wx 原子创建：start/resume 获取，终态释放，崩溃残留/终态自动接管）
+    └── <runId>/
+        ├── run.json           # { id, path, title?, tier?, request, status, currentState, budget, sessionIds, worktree?, baseSha?, parentRunId? }
+        ├── design.md / tasks.md / conclusion.md / prd.md / mr-body.md   # 各状态产物（GATE 审批对象；mr-body 为 MR 描述）
+        └── phase-history.jsonl # append-only：{ ts, from, to, event, evidence?, budgetLeft?, note?, usage? }
 ```
 
 每次转移**先 append history 再 writeRun**，进程随时可杀。resume 从 run.json 重建：gate/stopped@门禁态 → 重开 GATE；其余 stopped → 转 active 续跑；done/rejected 拒绝（v1.8 语义）；有 parentRunId 则从台账重建承接上下文（v1.10，不信进程内存）。
@@ -230,20 +232,20 @@ feature/bugfix 在 `.worktrees/<runId>/` 建独立分支（前缀 `feature/`）�
 6. **用户回 `a`**：`decide(approve)` → currentState=PLAN → tasks.md 生成；
 7. **IMPLEMENT**：逐任务循环——每任务一个 step（工作目录=worktree，角色=implementer，注入 implement.md+git-workflow.md），完成即勾选；用户中途输入 = steering 排队下一任务边界注入；
 8. **VERIFY**：跑 pinned 固定验收命令与项目验证命令，`tool_execution_*` 真实记录与自报 exitCode 交叉校验（恒真式构造拒绝）；失败扣 budget 转 DEBUG 诊断→修复→再验证（3 次累计耗尽转 stopped）；
-9. **GATE_MR**：mrPreview（diff 摘要+提交完整性警告）→ 用户 `a` → pushAndMr（gh 建 MR 或降级 push+compare URL）→ ARCHIVE → DONE，footer 归位，聊天流 run_done。
+9. **GATE_MR**：mrPreview（diff 摘要+提交完整性警告）→ 用户 `a` → pushAndMr（gh 建 MR——描述由 mr-body.md 富化：需求原话/路径/分级/产物指路；或降级 push+compare URL）→ ARCHIVE → DONE，footer 归位，聊天流 run_done。
 
 中断视角：任意时刻 `escape` → runner.abort → StepResult.aborted → 不扣预算转 stopped；重开 genpi 只提示一行，回"继续"→ resume 从台账续跑。
 
 ---
 
-## 7. 测试地图（112 用例，全部无需真模型）
+## 7. 测试地图（116 用例，全部无需真模型）
 
 | 测试文件 | 覆盖 | 怎么 mock |
 | --- | --- | --- |
-| `engine.test.ts`（32） | ★drive 循环全语义：四路径转移/GATE 死等/budget 连续语义（交错重置）/request_changes 不扣/steering/resume（含承接重建与补建 worktree）/中断/搁置不毒死新 run/T0 短链/T2 注入/prd 循环/CLARIFY 豁免/标题落账/pinned 接线/worktreeSetup/用量落账/worktree 失败置 stopped | StepRunner 全 mock（makeWorld） |
-| `step-runner.test.ts`（13） | SDK seam：注入装载/证据交叉校验（伪造 exitCode→fail）/恒真式审计拒绝与放行清单/pinned 三情形/产物存在性/用量聚合 | `setSessionFactoryForTest` |
-| `worktree.test.ts`（10） | 真实 git 仓：worktree 隔离/挂回既有分支/mrPreview/提交完整性警告/planCleanup+executeCleanup（干跑与执行，未推送分支防丢保留） | 玩具 git 仓/fake exec |
-| `ledger.test.ts`（1） | 台账原子写：tmp+rename 无残留、后写为准（契约 7 落盘底座） | 临时目录 |
+| `engine.test.ts`（33） | ★drive 循环全语义：四路径转移/GATE 死等/budget 连续语义（交错重置）/request_changes 不扣/steering/resume（含承接重建与补建 worktree）/中断/搁置不毒死新 run/T0 短链/T2 注入/prd 循环/CLARIFY 豁免/标题落账/pinned 接线/worktreeSetup/用量落账/worktree 失败置 stopped/active.lock 原子单活跃/mr-body 富化 | StepRunner 全 mock（makeWorld） |
+| `step-runner.test.ts`（14） | SDK seam：注入装载/证据交叉校验（伪造 exitCode→fail）/恒真式+平凡命令审计拒绝与放行清单（含 pipefail 管道）/pinned 三情形/产物非空/用量聚合 | `setSessionFactoryForTest` |
+| `worktree.test.ts`（12） | 真实 git 仓：worktree 隔离/挂回既有分支/复用补 baseSha/mrPreview/提交完整性警告/planCleanup+executeCleanup（干跑与执行，未推送分支防丢保留）/pushAndMr body-file | 玩具 git 仓/fake exec |
+| `ledger.test.ts`（2） | 台账原子写：tmp+rename 无残留、后写为准；active.lock 原子占位（独占/接管/验主幂等） | 临时目录 |
 | `e2e-headless.test.ts`（3） | 垂直切片：feature 全循环四件产物/push 降级/单活跃 | fake runner+玩具仓 |
 | `tui.test.ts` + `screens.test.ts`（17） | 纯函数：routeUserInput 分流/parseGateCommand/渲染（含用量展示） | 无 mock（纯函数） |
 | `router/config/ext-manager/extensions/resources`（35） | 四分类路由/tier 启发式/豁免判定/标题生成/routerModel 穿插/三级配置（worktreeSetup、models.router）/扩展管理/装载/资源 | 各自 seam |
@@ -259,7 +261,7 @@ feature/bugfix 在 `.worktrees/<runId>/` 建独立分支（前缀 `feature/`）�
 | 1 | 项目内零前置文件 | cli 启动即用 |
 | 2 | 产物只写 `.genpi/runs/`（worktree 除外） | ledger/initRun |
 | 3 | GATE 无 decide 不转移（模型不能自我放行） | driveLoop 门禁分支 return |
-| 4 | VERIFY 证据 exit code + 与真实执行交叉校验；恒真式构造拒绝；pinned 固定验收命令无权自选/省略/替换（两阶段 done，v1.10 补强） | step-runner crossCheck+masksExitCode / engine pinned |
+| 4 | VERIFY 证据 exit code + 与真实执行交叉校验；恒真式/平凡命令构造拒绝（管道需 pipefail 前缀）；pinned 固定验收命令无权自选/省略/替换（两阶段 done，v1.10 补强） | step-runner crossCheck+masksExitCode / engine pinned |
 | 4a | 自报产物存在性校验：未落盘进不了门禁（v1.10） | step-runner checkArtifacts |
 | 5 | feature/bugfix 必在 worktree，不碰主树 | GitOps.ensureWorktree |
 | 6 | budget 默认 3 **连续**失败耗尽 STOP；任务推进/状态成功重置；VERIFY 累计封顶（v1.10 澄清） | driveLoop fail/ok 分支 + #runWorkState |
@@ -271,7 +273,7 @@ feature/bugfix 在 `.worktrees/<runId>/` 建独立分支（前缀 `feature/`）�
 | 12 | 决策与转移入 phase-history | appendHistory（每次转移） |
 | 13 | steering 边界注入，不跳状态不扣预算 | steer()/#instruction |
 | 14 | MR 失败不判 run 失败，降级 push+URL | pushAndMr |
-| 15 | 单项目单活跃 run；打开仅提示不自动复活（v1.7） | start 检查/session_start |
+| 15 | 单项目单活跃 run（active.lock wx 原子占位：start/resume 获取、终态释放、崩溃残留接管、败者转 stopped）；打开仅提示不自动复活（v1.7） | ledger tryAcquireActive/#emit 释放/session_start |
 | 16 | 角色模型 implementer/reviewer/**router**；worktreeSetup 依赖引导；`genpi clean` 清理（v1.10 扩展） | #roleFor+resolveCliModel / config / cli |
 | 17 | 扩展初始零，显式安装 | ext-manager 剥离+install |
 | 18 | TUI 复用 pi InteractiveMode，门禁聊天命令化非模态 | app.ts 编排扩展 |

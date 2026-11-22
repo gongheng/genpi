@@ -19,7 +19,7 @@ export interface GitOps {
   /** T38/C4：worktree 新建后依赖引导（如 npm ci）；失败由引擎告警不阻塞 */
   setup(worktreeDir: string, command: string): Promise<{ code: number; out: string }>;
   mrPreview(worktreeDir: string, baseSha?: string): Promise<string | null>;
-  pushAndMr(worktreeDir: string, opts: { mrTarget: string; runId: string; summary: string }): Promise<{ mode: "mr" | "manual"; url: string }>;
+  pushAndMr(worktreeDir: string, opts: { mrTarget: string; runId: string; summary: string; bodyFile?: string }): Promise<{ mode: "mr" | "manual"; url: string }>;
 }
 
 export class GenpiActiveRunError extends Error {
@@ -42,7 +42,7 @@ export interface EngineDeps {
 const STATE_INSTRUCTIONS: Partial<Record<StateId, string>> = {
   CLARIFY: "澄清需求：就模糊点向用户提问（每行以 ❓ 开头），无问题则产出理解摘要",
   DESIGN: "写 design.md（动机与范围/技术方案/行为契约），保存到运行目录",
-  PLAN: "基于 design.md 写 tasks.md（原子任务清单，每任务含验收命令）",
+  PLAN: "基于 design.md 写 tasks.md（原子任务清单，每任务含验收命令；验收命令须可失败——测试/构建/lint 等，echo/true/无 pipefail 管道等恒真式会被机器剔除）",
   IMPLEMENT: "按 tasks.md 逐任务实现（TDD：先红后绿），完成后在 tasks.md 勾销",
   VERIFY: "运行项目验证命令（测试/构建/lint），逐条记录命令与 exit code",
   REPRODUCE: "复现 bug：给出最小复现步骤与证据",
@@ -69,16 +69,36 @@ export class LoopEngine {
 
   constructor(private deps: EngineDeps) {}
 
+  /** 发射统一出口：run 离开 active/gate 的两个终态事件同步释放单活跃占位（契约 15，P1/TOCTOU）。
+ *  fire-and-forget：释放与下一 start 的 acquire 竞态由接管逻辑兑底（占位指向终态即重写）。 */
+  #emit(e: EngineEvent): void {
+    if (e.type === "run_done" || e.type === "run_stopped") {
+      void this.deps.ledger.releaseActive(this.deps.projectRoot, e.runId).catch(() => {});
+    }
+    this.deps.emit(e);
+  }
+
+  /** 原子占位（契约 15）：竞态败者把本 run 置 stopped 留 resume 出路，不留 active 孤儿卡死后续 start。 */
+  async #acquireOrStop(runId: RunId, runDir: string): Promise<void> {
+    const held = await this.deps.ledger.tryAcquireActive(this.deps.projectRoot, runId);
+    if (held && held !== runId) {
+      const rec = await this.deps.ledger.readRun(runDir);
+      rec.status = "stopped";
+      await this.deps.ledger.writeRun(runDir, rec);
+      await this.deps.ledger.appendHistory(runDir, { ts: now(), from: rec.currentState, to: rec.currentState, event: "single_active_lost", note: `单活跃竞态：${held} 已占位，本 run 转 stopped 可 --resume` });
+      throw new GenpiActiveRunError(held);
+    }
+  }
+
   async start(
     path: PathId,
     request: string,
     onCreated?: (runId: RunId) => void,
     opts?: { tier?: Tier; waiveClarify?: boolean; waiveReason?: string; title?: string; parentRunId?: RunId; routeBy?: string; routeReason?: string },
   ): Promise<RunId> {
-    const runs = await this.deps.ledger.listRuns(this.deps.projectRoot);
-    const active = runs.find((r) => r.status === "active" || r.status === "gate");
-    if (active) throw new GenpiActiveRunError(active.id);
+    // 契约 15：单活跃原子占位（wx 锁）取代 listRuns 检查——两实例并发 start 不再双双通过（TOCTOU）
     const { runId, runDir } = await this.deps.ledger.initRun(this.deps.projectRoot, path, request, opts?.title);
+    await this.#acquireOrStop(runId, runDir);
     const rec = await this.deps.ledger.readRun(runDir);
     if (opts?.parentRunId) {
       rec.parentRunId = opts.parentRunId; // 契约 24/A：承接轮落账；前轮产物目录注入指令（先读再动手）
@@ -150,6 +170,8 @@ export class LoopEngine {
       }
     }
     if (rec.status === "done" || rec.status === "rejected") throw new Error(`run ${runId} 状态 ${rec.status} 不可恢复`);
+    // 契约 15：resume 同样占位——另一 run 活跃时拒绝；自持占位幂等（崩溃后锁仍在，指向本 run）
+    await this.#acquireOrStop(runId, runDir);
     if (rec.status === "gate" || (rec.status === "stopped" && def.gates[rec.currentState])) {
       // stopped 停在门禁态同样重开（契约 19：转 stopped 可续跑，v1.8 修正与提示语/README 的一致性）
       rec.status = "gate";
@@ -157,7 +179,7 @@ export class LoopEngine {
       const gate = def.gates[rec.currentState];
       const preview =
         gate?.artifact === "mr" && rec.worktree ? await this.deps.git.mrPreview(rec.worktree, rec.baseSha) : undefined;
-      this.deps.emit({
+      this.#emit({
         type: "gate_opened",
         runId,
         gate: rec.currentState,
@@ -178,13 +200,13 @@ export class LoopEngine {
     const def = PATHS[rec.path];
     const gate = def.gates[rec.currentState];
     if (!gate) throw new Error(`${rec.currentState} 不是 GATE`);
-    this.deps.emit({ type: "gate_resolved", runId, gate: rec.currentState, decision: d });
+    this.#emit({ type: "gate_resolved", runId, gate: rec.currentState, decision: d });
     await this.deps.ledger.appendHistory(runDir, { ts: now(), from: rec.currentState, to: rec.currentState, event: `gate_${d.kind}`, note: d.note });
     if (d.kind === "reject") {
       rec.status = "rejected";
       await this.deps.ledger.writeRun(runDir, rec);
       await this.#logConversation(runId, rec.path, rec.request, "rejected", "人工终止（产物保留）");
-      this.deps.emit({ type: "run_done", runId, summary: "人工终止（产物保留）" });
+      this.#emit({ type: "run_done", runId, summary: "人工终止（产物保留）" });
       return;
     }
     if (d.kind === "request_changes") {
@@ -196,10 +218,24 @@ export class LoopEngine {
     }
     // approve
     if (rec.currentState === "GATE_MR") {
+      // MR 描述富化（P3）：需求原话/路径/分级/产物指路写 mr-body.md（台账内可审计），--body-file 传入；写失败退回默认文案
+      const bodyFile = join(runDir, "mr-body.md");
+      try {
+        writeFileSync(bodyFile, [
+          `genpi run ${runId}`,
+          rec.title ? `标题：${rec.title}` : "",
+          `需求：${rec.request}`,
+          `路径：${rec.path}${rec.tier ? `/${rec.tier}` : ""}`,
+          `产物：${join(basename(runDir), "design.md")} · ${join(basename(runDir), "tasks.md")}`,
+        ].filter(Boolean).join("\n"));
+      } catch {
+        /* body 写失败：pushAndMr 退回 --body 默认文案 */
+      }
       const r = await this.deps.git.pushAndMr(rec.worktree ?? this.deps.projectRoot, {
         mrTarget: this.deps.config.mrTarget,
         runId,
         summary: `genpi run ${runId}`,
+        ...(existsSync(bodyFile) ? { bodyFile } : {}),
       });
       await this.deps.ledger.appendHistory(runDir, { ts: now(), from: "GATE_MR", to: "ARCHIVE", event: `push_${r.mode}`, note: r.url });
     }
@@ -236,7 +272,7 @@ export class LoopEngine {
     await this.deps.ledger.writeRun(runDir, rec);
     await this.deps.ledger.appendHistory(runDir, { ts: now(), from: rec.currentState, to: rec.currentState, event: "stopped", note: reason });
     await this.#logConversation(runId, rec.path, rec.request, "stopped", reason);
-    this.deps.emit({ type: "run_stopped", runId, reason }); // 「可 --resume 续跑」提示由展示层统一追加，防重复拼接
+    this.#emit({ type: "run_stopped", runId, reason }); // 「可 --resume 续跑」提示由展示层统一追加，防重复拼接
   }
 
   /** 契约 5：代码路径必须有隔离 worktree（start/resume 共用）。缺失时补建；成功后落账。 */
@@ -263,7 +299,7 @@ export class LoopEngine {
     rec.status = "stopped";
     await this.deps.ledger.writeRun(runDir, rec);
     await this.deps.ledger.appendHistory(runDir, { ts: now(), from: rec.currentState, to: rec.currentState, event: "worktree_failed", note: String(e).slice(0, 160) });
-    this.deps.emit({ type: "run_stopped", runId, reason: "worktree 创建失败（run 已转 stopped，修复后可 --resume 续跑）" });
+    this.#emit({ type: "run_stopped", runId, reason: "worktree 创建失败（run 已转 stopped，修复后可 --resume 续跑）" });
   }
 
   private async drive(runDir: string, def: PathDef): Promise<void> {
@@ -283,7 +319,7 @@ export class LoopEngine {
     const chain = chainFor(def, rec.tier); // 契约 20：tier 决定链变体（缺省 t1 全链；旧 run 无 tier 同样回退）
     while (rec.status === "active") {
       const state = rec.currentState;
-      this.deps.emit({ type: "state_entered", runId, state });
+      this.#emit({ type: "state_entered", runId, state });
 
       if (state === "INIT") {
         const next = chain[1];
@@ -297,7 +333,7 @@ export class LoopEngine {
         await this.deps.ledger.writeRun(runDir, rec);
         await this.deps.ledger.appendHistory(runDir, { ts: now(), from: "ARCHIVE", to: "DONE", event: "run_done" });
         await this.#logConversation(runId, rec.path, rec.request, "done", this.lastSum.get(runId) ?? "");
-        this.deps.emit({ type: "run_done", runId, summary: this.lastSum.get(runId) || "循环完成" }); // T34：带末步要点（结论即交付的路径尤其需要）
+        this.#emit({ type: "run_done", runId, summary: this.lastSum.get(runId) || "循环完成" }); // T34：带末步要点（结论即交付的路径尤其需要）
         continue;
       }
       if (state === "DONE") {
@@ -305,7 +341,7 @@ export class LoopEngine {
         await this.deps.ledger.writeRun(runDir, rec);
         await this.deps.ledger.appendHistory(runDir, { ts: now(), from: "DONE", to: "DONE", event: "run_done" });
         await this.#logConversation(runId, rec.path, rec.request, "done", this.lastSum.get(runId) ?? "");
-        this.deps.emit({ type: "run_done", runId, summary: this.lastSum.get(runId) || "循环完成" }); // T34：同上
+        this.#emit({ type: "run_done", runId, summary: this.lastSum.get(runId) || "循环完成" }); // T34：同上
         continue;
       }
       const gate = def.gates[state];
@@ -315,7 +351,7 @@ export class LoopEngine {
         const artifactPath = gate.artifact === "mr" ? "MR 变更摘要" : join(basename(runDir), gate.artifact);
         const preview = gate.artifact === "mr" && rec.worktree ? await this.deps.git.mrPreview(rec.worktree, rec.baseSha) : undefined;
         await this.deps.ledger.appendHistory(runDir, { ts: now(), from: state, to: state, event: "gate_opened", note: gate.artifact });
-        this.deps.emit({ type: "gate_opened", runId, gate: state, artifactPath, ...(preview ? { preview } : {}) });
+        this.#emit({ type: "gate_opened", runId, gate: state, artifactPath, ...(preview ? { preview } : {}) });
         return;
       }
       // 工作态（IMPLEMENT 逐任务循环，其余单步）
@@ -327,7 +363,7 @@ export class LoopEngine {
         rec.status = "stopped";
         await this.deps.ledger.writeRun(runDir, rec);
         await this.deps.ledger.appendHistory(runDir, { ts: now(), from: state, to: state, event: "aborted", note: result.summary });
-        this.deps.emit({ type: "run_stopped", runId, reason: "用户中断" });
+        this.#emit({ type: "run_stopped", runId, reason: "用户中断" });
         return;
       }
       if (result.ok) {
@@ -348,11 +384,11 @@ export class LoopEngine {
         rec.budget[state] = left;
         await this.deps.ledger.writeRun(runDir, rec);
         await this.deps.ledger.appendHistory(runDir, { ts: now(), from: state, to: state, event: "step_fail", budgetLeft: left });
-        this.deps.emit({ type: "budget_changed", runId, state, remaining: left });
+        this.#emit({ type: "budget_changed", runId, state, remaining: left });
         if (left <= 0) {
           rec.status = "stopped";
           await this.deps.ledger.writeRun(runDir, rec);
-          this.deps.emit({ type: "run_stopped", runId, reason: `步骤 ${state} 连续失败 ${this.deps.config.budget} 次（fail budget 耗尽）` });
+          this.#emit({ type: "run_stopped", runId, reason: `步骤 ${state} 连续失败 ${this.deps.config.budget} 次（fail budget 耗尽）` });
           return;
         }
         // 契约 23（T28b）：VERIFY 失败不盲重试——转 DEBUG 诊断（定位根因→回修复态→再验证）；VERIFY budget 仍为循环封顶
@@ -376,7 +412,10 @@ export class LoopEngine {
         const pinned = all.filter((c) => !masksExitCode(c));
         const dropped = all.filter((c) => masksExitCode(c));
         if (dropped.length > 0) {
-          await this.deps.ledger.appendHistory(runDir, { ts: now(), from: "VERIFY", to: "VERIFY", event: "verify_pin_dropped", note: `验收命令含恒真式构造被剔除（tasks.md 应修正）：${dropped.join("；")}` });
+          // 证据强制 II：剔除不只落史——run_warning 上屏（用户需知道验收被削弱了，tasks.md 应修正）
+          const note = `验收命令含恒真式/平凡命令被剔除（tasks.md 应修正）：${dropped.join("；")}`;
+          await this.deps.ledger.appendHistory(runDir, { ts: now(), from: "VERIFY", to: "VERIFY", event: "verify_pin_dropped", note });
+          this.#emit({ type: "run_warning", runId, note });
         }
         return this.#runStep(runDir, runId, def, state, request, worktree, undefined, tier, pinned);
       }
@@ -431,14 +470,14 @@ export class LoopEngine {
       };
       const result = await this.deps.runner.run(spec, (e: StepEvent) => {
         if (e.type === "question") questions.push(e.text);
-        else if (e.type === "text") this.deps.emit({ type: "step_stream", runId, delta: e.delta });
-        else if (e.type === "thinking") this.deps.emit({ type: "step_thinking", runId, delta: e.delta });
-        else if (e.type === "tool") this.deps.emit({ type: "step_tool", runId, name: e.name, detail: e.detail });
+        else if (e.type === "text") this.#emit({ type: "step_stream", runId, delta: e.delta });
+        else if (e.type === "thinking") this.#emit({ type: "step_thinking", runId, delta: e.delta });
+        else if (e.type === "tool") this.#emit({ type: "step_tool", runId, name: e.name, detail: e.detail });
       });
-      this.deps.emit({ type: "step_finished", runId, state, ok: result.ok, ...(result.aborted ? { aborted: true } : { summary: result.summary, ...(result.artifacts.length > 0 ? { artifacts: result.artifacts } : {}), ...(result.usage ? { usage: result.usage } : {}) }) });
+      this.#emit({ type: "step_finished", runId, state, ok: result.ok, ...(result.aborted ? { aborted: true } : { summary: result.summary, ...(result.artifacts.length > 0 ? { artifacts: result.artifacts } : {}), ...(result.usage ? { usage: result.usage } : {}) }) });
       if (!result.ok || questions.length === 0 || ++rounds >= QA_MAX_ROUNDS) return result;
       for (const q of questions) {
-        this.deps.emit({ type: "agent_question", runId, text: q });
+        this.#emit({ type: "agent_question", runId, text: q });
         const a = await this.deps.ask(q);
         const prev = this.qa.get(runId) ?? "";
         this.qa.set(runId, `${prev}Q:${q}\nA:${a}\n`);
@@ -486,7 +525,7 @@ export class LoopEngine {
       if (existsSync(tasksPath)) {
         const pinned = extractAcceptanceCommands(readFileSync(tasksPath, "utf8")).filter((c) => !masksExitCode(c));
         if (pinned.length > 0) {
-          verifyPinned = ["# 固定验收命令（机器强制：无权自选/省略/替换，逐条真实执行并记录）", ...pinned.map((c) => `- ${c}`), "命令含 || / ; / | / $( 等恒真式构造会被机器拒绝；每条验收命令真实 exit code 必须为 0。"].join("\n");
+          verifyPinned = ["# 固定验收命令（机器强制：无权自选/省略/替换，逐条真实执行并记录）", ...pinned.map((c) => `- ${c}`), "命令含 || / ; / 无 pipefail 的 | / $( 等恒真式或 echo/true 等平凡命令会被机器拒绝（管道需 `set -o pipefail && ` 前缀）；每条验收命令真实 exit code 必须为 0。"].join("\n");
         }
       }
     }

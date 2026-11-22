@@ -216,4 +216,36 @@ describe("worktree + MR", () => {
     const tip2 = execSync(`git -C ${JSON.stringify(wt2.path)} rev-parse HEAD`, { encoding: "utf8", stdio: "pipe" }).trim();
     expect(tip2).toBe(tip); // 挂回的是既有分支（提交未丢）
   });
+
+  it("⑧b 复用 worktree 补 baseSha：已注册时二次 ensure 返回当前 HEAD（GATE_MR 预览不再退回 HEAD~1 猜基线）", async () => {
+    const { project } = makeRepo();
+    const ops = createGitOps(createShellExec());
+    const runId = "20260214-1800-feature-reuse";
+    const wt1 = await ops.ensureWorktree(project, runId, "feature/", ".worktrees/");
+    const wt2 = await ops.ensureWorktree(project, runId, "feature/", ".worktrees/"); // 已注册→复用
+    expect(wt2.created).toBe(false);
+    expect(wt2.baseSha).toMatch(/^[0-9a-f]{7,40}$/);
+    expect(wt2.baseSha).toBe(wt1.baseSha); // 未动过的 worktree：HEAD 即基线
+  });
+
+  it("⑨ P3 MR 描述富化：bodyFile 走 --body-file；缺省退回 --body 默认文案", async () => {
+    const cmds: string[] = [];
+    const exec: ExecFn = async (_cwd, cmd) => {
+      cmds.push(cmd);
+      if (cmd.includes('"gh" pr create')) return { code: 0, out: "https://example.com/pull/7\n" };
+      if (cmd.includes('"gh" --version')) return { code: 0, out: "gh version 9.0.0\n" };
+      if (cmd.includes("git remote get-url")) return { code: 0, out: "git@github.com:alice/blog.git\n" };
+      if (cmd.includes("git rev-parse --abbrev-ref")) return { code: 0, out: "feature/x\n" };
+      return { code: 0, out: "" }; // push 等
+    };
+    const ops = createGitOps(exec, { ghPath: "gh" });
+    const r1 = await ops.pushAndMr("/w", { mrTarget: "github", runId: "x", summary: "s", bodyFile: "/run/mr-body.md" });
+    expect(r1.mode).toBe("mr");
+    expect(r1.url).toContain("pull/7");
+    expect(cmds.find((c) => c.includes("pr create"))).toContain('--body-file "/run/mr-body.md"');
+    cmds.length = 0;
+    const r2 = await ops.pushAndMr("/w", { mrTarget: "github", runId: "x", summary: "s" });
+    expect(r2.mode).toBe("mr");
+    expect(cmds.find((c) => c.includes("pr create"))).toContain('--body "由 genpi 生成"');
+  });
 });

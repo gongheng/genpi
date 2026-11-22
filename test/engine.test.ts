@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFsLedger } from "../src/engine/ledger";
 import { GenpiActiveRunError, LoopEngine, type EngineDeps, type GitOps, type ResourceProvider } from "../src/engine/loop-engine";
 import { PATHS } from "../src/engine/paths";
@@ -297,13 +297,19 @@ describe("IMPLEMENT 逐任务循环", () => {
     expect(rec.status).toBe("done");
   });
 
-  it("⑫ GATE_MR 开门时携带变更预览（审批对象不再是空标签）", async () => {
+  it("⑫ GATE_MR 开门携带变更预览；批准时写 mr-body.md 传 --body-file（MR 描述富化）", async () => {
     const w = makeWorld((spec) => (spec.state === "VERIFY" ? { result: ok([], [{ command: "npm test", exitCode: 0, outputTail: "ok" }]) } : { result: ok() }));
     const engine = new LoopEngine(w.deps);
     const runId = await engine.start("feature", "加功能");
     await engine.decide(runId, { kind: "approve" }); // 过 GATE_DESIGN
     const mrGate = w.events.find((e) => e.type === "gate_opened" && (e as { gate: string }).gate === "GATE_MR") as { preview?: string };
     expect(mrGate?.preview).toContain("fake: 改动");
+    await engine.decide(runId, { kind: "approve" }); // 过 GATE_MR → 写 mr-body.md + pushAndMr(manual)
+    const runDir = join(w.projectRoot, ".genpi", "runs", runId);
+    const body = readFileSync(join(runDir, "mr-body.md"), "utf8");
+    expect(body).toContain("需求：加功能"); // 需求原话进 MR 描述
+    expect(body).toContain("路径：feature");
+    expect(body).toContain("design.md"); // 产物指路
   });
 
   it("⑬ Q&A 等待期 stop：不再多跑一步，run_stopped 只发一次（契约 19）", async () => {
@@ -615,6 +621,8 @@ describe("IMPLEMENT 逐任务循环", () => {
     const histAll = readFileSync(join(w.projectRoot, ".genpi", "runs", (w.events[0] as { runId: string }).runId, "phase-history.jsonl"), "utf8");
     expect(histAll).toContain("verify_pin_dropped");
     expect(histAll).toContain("npm test || true");
+    // 证据强制 II：剔除不仅落史，run_warning 事件上屏（用户需知道验收被削弱）
+    expect(w.events).toContainEqual({ type: "run_warning", runId: rid, note: expect.stringContaining("npm test || true") });
   });
 
   it("㉙ T38/D6 用量记账：step_finished 携带 usage，step_ok 落 phase-history", async () => {
@@ -679,12 +687,41 @@ describe("IMPLEMENT 逐任务循环", () => {
     expect(existsSync(rec2.worktree)).toBe(true);
     expect(w.events.at(-1)?.type).toBe("gate_opened"); // 补建后照常重开门禁
     // research 无 worktree：resume 不 ensure
-    const w2 = makeWorld(() => ({ result: ok() }));
+    const w3 = makeWorld(() => ({ result: ok() }));
     let ensureCount = 0;
-    const re2 = w2.deps.git.ensureWorktree.bind(w2.deps.git);
-    w2.deps.git = { ...w2.deps.git, ensureWorktree: async (root, id, p, d) => (ensureCount++, re2(root, id, p, d)) };
-    const rid2 = await new LoopEngine(w2.deps).start("research", "纯调研");
-    await new LoopEngine(w2.deps).resume(rid2).catch(() => undefined); // 已 done 会抛（不可恢复）
+    const re3 = w3.deps.git.ensureWorktree.bind(w3.deps.git);
+    w3.deps.git = { ...w3.deps.git, ensureWorktree: async (root, id, p, d) => (ensureCount++, re3(root, id, p, d)) };
+    const rid3 = await new LoopEngine(w3.deps).start("research", "纯调研");
+    await new LoopEngine(w3.deps).resume(rid3).catch(() => undefined); // 已 done 会抛（不可恢复）
     expect(ensureCount).toBe(0);
+  });
+
+  it("㉜ P1 active.lock 原子单活跃（契约 15）：终态释放占位；崩溃残留接管；gate 占用拒绝且败者转 stopped；自持幂等；并发 resume 拒绝", async () => {
+    const w = makeWorld(() => ({ result: ok() }));
+    const lockPath = join(w.projectRoot, ".genpi", "runs", "active.lock");
+    const runId = await new LoopEngine(w.deps).start("research", "先跑完");
+    const rec = JSON.parse(readFileSync(join(w.projectRoot, ".genpi", "runs", runId, "run.json"), "utf8"));
+    expect(rec.status).toBe("done");
+    await vi.waitFor(() => expect(existsSync(lockPath)).toBe(false)); // 终态释放（fire-and-forget，接管兑底竞态）
+
+    // 崩溃残留：占位指向终态 run → 接管，新 run 正常 start
+    writeFileSync(lockPath, JSON.stringify({ runId, ts: new Date().toISOString() }));
+    const rid2 = await new LoopEngine(w.deps).start("research", "接管后的新 run");
+    expect(rid2).not.toBe(runId);
+
+    // gate 占用：第二个 start 拒绝，败者转 stopped（无 active 孤儿，可 --resume）
+    const w2 = makeWorld(() => ({ result: ok() }));
+    const gateRun = await new LoopEngine(w2.deps).start("feature", "门禁中的 run");
+    await expect(new LoopEngine(w2.deps).start("feature", "第二个")).rejects.toBeInstanceOf(GenpiActiveRunError);
+    const loser = (await w2.deps.ledger.listRuns(w2.projectRoot)).find((r) => r.id !== gateRun);
+    expect(loser?.status).toBe("stopped");
+
+    // 自持占位幂等：resume 同一 gate run 照常重开门禁
+    w2.events.length = 0;
+    await new LoopEngine(w2.deps).resume(gateRun);
+    expect(w2.events.at(-1)?.type).toBe("gate_opened");
+
+    // 并发 resume 拒绝：A 在 gate 占位，resume 败者 B → GenpiActiveRunError
+    await expect(new LoopEngine(w2.deps).resume(loser!.id)).rejects.toBeInstanceOf(GenpiActiveRunError);
   });
 });

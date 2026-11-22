@@ -74,6 +74,7 @@ export type EngineEvent =
   | { type: "gate_resolved"; runId: RunId; gate: StateId; decision: GateDecision }
   | { type: "budget_changed"; runId: RunId; state: StateId; remaining: number }
   | { type: "run_stopped"; runId: RunId; reason: string }
+  | { type: "run_warning"; runId: RunId; /** 非致命警告上屏（如 pinned 验收命令被剔除）：需用户可见但不阻断循环 */ note: string }
   | { type: "run_done"; runId: RunId; summary: string };
 
 export interface RunRecord {

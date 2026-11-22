@@ -202,10 +202,38 @@ describe("step-runner", () => {
     }
   });
 
-  it("⑩ T38/A1① masksExitCode：恒真式构造识别（拒绝掩错复合，放行不掩错构造）", () => {
-    const deny = ["npm test || true", "npm test; echo ok", "npm test | tee log", "echo $(date)", "echo `date`", "! npm test", "npm test &", "npm test\nnpm test2"];
+  it("⑩ 恒真式/平凡命令识别（A1① + 证据强制 II：拒掩错复合与平凡命令，放行 pipefail 管道与不掩错构造）", () => {
+    const deny = [
+      "npm test || true",
+      "npm test; echo ok",
+      "npm test | tee log",
+      "echo $(date)",
+      "echo `date`",
+      "! npm test",
+      "npm test &",
+      "npm test\nnpm test2",
+      "set -o pipefail && npm test || echo fail", // pipefail 前缀不救 ||：仍拒
+      "set -o pipefail; npm test | tail -5", // ; 分隔仍拒
+      // 平凡命令：恒 exit 0，验收语义为空
+      "true",
+      ":",
+      "pwd",
+      "exit 0",
+      "echo ok",
+      "echo \"构建成功\"",
+    ];
     for (const c of deny) expect(masksExitCode(c), c).toBe(true);
-    const allow = ["npm test", "npm test && echo ok", "npm test 2>&1", "npm test > log.txt", "cd sub && npm test", "npm test -- --filter=a"];
+    const allow = [
+      "npm test",
+      "npm test && echo ok",
+      "npm test 2>&1",
+      "npm test > log.txt",
+      "cd sub && npm test",
+      "npm test -- --filter=a",
+      // 管道 + pipefail 前缀：退出码取最右非零，长输出截断不再一刀切
+      "set -o pipefail && npm test 2>&1 | tail -50",
+      "set -o pipefail && cat a.txt | grep -c foo",
+    ];
     for (const c of allow) expect(masksExitCode(c), c).toBe(false);
   });
 
@@ -231,14 +259,17 @@ describe("step-runner", () => {
     expect(good.ok).toBe(true);
   });
 
-  it("⑬ T38/A2 checkArtifacts：自报产物在解析根下存在才放行（绝对/相对路径）", () => {
+  it("⑬ checkArtifacts：自报产物在解析根下存在且非空才放行（绝对/相对路径；空文件多为写入失败残留）", () => {
     const root = join(tmpdir(), `genpi-t38-${Math.random().toString(36).slice(2)}`);
     mkdirSync(join(root, "run"), { recursive: true });
     writeFileSync(join(root, "run", "design.md"), "# 设计");
+    writeFileSync(join(root, "run", "empty.md"), ""); // 空文件：存在但无内容
     try {
       expect(checkArtifacts(["design.md"], [join(root, "run")]).ok).toBe(true);
       expect(checkArtifacts(["missing.md"], [join(root, "run")]).ok).toBe(false);
+      expect(checkArtifacts(["empty.md"], [join(root, "run")]).ok).toBe(false); // 非空补强
       expect(checkArtifacts([join(root, "run", "design.md")], []).ok).toBe(true); // 绝对路径直接查
+      expect(checkArtifacts(["empty.md"], [join(root, "run")]).note).toContain("不存在或为空");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

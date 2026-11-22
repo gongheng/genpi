@@ -5,6 +5,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import pkg from "../../package.json" with { type: "json" };
 import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { EngineEvent, GateDecision, PathId, StepRunner } from "../types";
 import { applyDataRoot } from "../config";
@@ -12,7 +13,7 @@ import { bootstrap } from "../engine/bootstrap";
 import { heuristicRoute, routeRequest } from "../router";
 import { applyDelta, createStepLiveState, cutBoundary, fmtRoute, fmtStepDigest, formatHistoryLines, gateHint, renderGateBlock, renderStepLiveView, renderWelcome } from "./screens";
 
-export const VERSION = "0.1.0";
+export const VERSION = pkg.version; // 单源：package.json（消 dual-maintenance 漂移）
 
 // ---------- 门禁命令解析（纯函数，测试面） ----------
 
@@ -209,6 +210,9 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
         currentRunId = null;
         phase = "idle";
         pendingResume = e.runId; // 中断/耗尽/搁置后回「继续」可续跑（引擎已支持 stopped 恢复，v1.8）
+        break;
+      case "run_warning":
+        say(`⚠ ${e.note}`); // 非致命警告（如 pinned 验收被剔除）：上屏不阻断
         break;
       default:
         break;

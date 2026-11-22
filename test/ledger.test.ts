@@ -1,5 +1,5 @@
 // P0 台账原子写：writeRun 走 tmp+rename，无 .tmp 残留、多次写以后写为准——契约 7「进程随便杀，重启即续」的落盘底座
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -39,5 +39,35 @@ describe("fs ledger", () => {
     // listRuns 不被 tmp 干扰（tmp 在 run 目录内，不在 runs 根）
     const runs = await ledger.listRuns(root);
     expect(runs.map((r) => r.id)).toEqual([runId]);
+  });
+
+  it("P1 active.lock 原子单活跃：wx 独占；active 占用返回占位者；终态/崩溃残留接管；释放验主幂等；listRuns 不受占位干扰", async () => {
+    const root = mkd();
+    const ledger = createFsLedger();
+    const a = await ledger.initRun(root, "feature", "需求A");
+    const b = await ledger.initRun(root, "feature", "需求B");
+    const lockPath = join(root, ".genpi", "runs", "active.lock");
+
+    expect(await ledger.tryAcquireActive(root, a.runId)).toBeNull(); // A 占位（run 初始即 active）
+    expect(await ledger.tryAcquireActive(root, b.runId)).toBe(a.runId); // 被占→返回占位者
+    await ledger.releaseActive(root, b.runId); // 验主：B 释放不动 A 的占位
+    expect(existsSync(lockPath)).toBe(true);
+    expect(await ledger.tryAcquireActive(root, b.runId)).toBe(a.runId);
+
+    const recA = await ledger.readRun(a.runDir);
+    recA.status = "done";
+    await ledger.writeRun(a.runDir, recA);
+    expect(await ledger.tryAcquireActive(root, b.runId)).toBeNull(); // 占位指向终态→接管
+
+    await ledger.releaseActive(root, a.runId); // 旧主释放：幂等无操作
+    await ledger.releaseActive(root, b.runId); // 本人释放
+    expect(await ledger.tryAcquireActive(root, b.runId)).toBeNull(); // 重新可占
+
+    writeFileSync(lockPath, JSON.stringify({ runId: "不存在的run" })); // 崩溃残留
+    expect(await ledger.tryAcquireActive(root, b.runId)).toBeNull(); // 指向缺失 run→接管
+    expect(await ledger.tryAcquireActive(root, b.runId)).toBe(b.runId); // 自持幂等：返回自身
+
+    await ledger.releaseActive(root, b.runId);
+    expect(await ledger.listRuns(root)).toHaveLength(2); // 占位文件不入台账列表
   });
 });

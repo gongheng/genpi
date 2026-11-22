@@ -2,7 +2,7 @@
 // 扩展透传（契约 17）：内联 extensionFactories + additionalExtensionPaths + pi 三层自动发现
 // 契约 4（v1.6）：bash 真实执行记录（tool_execution_* 事件）与模型自报 evidence 交叉校验，伪造即 fail
 // T38：A1 验收命令强制（复合运算符审计 + pinned 覆盖）/ A2 产物存在性校验 / D6 token 用量聚合
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { CommandEvidence, StepEvent, StepResult, StepRunner, StepSpec, StateId } from "../types";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -223,32 +223,47 @@ export function createPiStepRunner(opts: PiStepRunnerOptions = {}): StepRunner {
 const normCmd = (c: string): string => c.trim().replace(/\s+/g, " ");
 
 /**
- * 恒真式审计（T38/A1①，纯函数）：验证命令里能抹掉真实退出码的 shell 构造一律拒绝。
- * 拒绝：`||`、`;`、`|`（无 pipefail 时取末命令退出码）、`$(...)`、反引号、行首 `!` 取反、末尾单 `&` 后台。
- * 放行：`&&`（全成功才 0，不掩错）、重定向（不改退出码）、`2>&1`（& 后非空白）。
+ * 恒真式/平凡命令审计（T38/A1① + 证据强制 II，纯函数）：能抹掉真实退出码的命令一律拒绝。
+ * 拒绝：`||`、`;`、`|`（无 pipefail 时取末命令退出码）、`$(...)`、反引号、行首 `!` 取反、末尾单 `&` 后台、
+ * 平凡命令（`true`/`:`/`pwd`/`exit 0`/`echo …`——恒 exit 0，验收语义为空）。
+ * 放行：`&&`（全成功才 0，不掩错）、重定向（不改退出码）、`2>&1`（& 后非空白）、
+ * 管道带 `set -o pipefail && ` 前缀（退出码取最右非零，长输出截断如 `… | tail` 不再被一刀切）。
  */
 export function masksExitCode(cmd: string): boolean {
   const c = cmd.trim();
   if (c.startsWith("!")) return true;
   if (/[\n;]/.test(c)) return true;
-  if (c.includes("|")) return true;
   if (c.includes("$(") || c.includes("`")) return true;
   if (/(^|[^&])&(?=\s|$)/.test(c)) return true;
+  if (c.includes("|")) {
+    if (c.includes("||")) return true;
+    return !/^set -o pipefail && /.test(c); // 管道仅 pipefail 前缀放行
+  }
+  if (/^(true|:|pwd|exit( 0)?)$/i.test(c)) return true; // 平凡命令：恒 exit 0，验收语义为空
+  if (/^echo(\s|$)/i.test(c)) return true;
   return false;
 }
 
 /**
- * 产物存在性校验（T38/A2，纯函数）：自报 artifacts 逐个在解析根（绝对路径直接查）下 existsSync，缺失即 fail。
+ * 产物存在性校验（T38/A2 + 非空补强，纯函数）：自报 artifacts 逐个在解析根（绝对路径直接查）下
+ * 存在且非空，缺失/空文件即 fail——空 design.md 多为写入失败残留，不该进门禁。
  */
 export function checkArtifacts(artifacts: string[], roots: string[]): { ok: boolean; note?: string } {
   const missing: string[] = [];
+  const present = (p: string): boolean => {
+    try {
+      return existsSync(p) && statSync(p).size > 0;
+    } catch {
+      return false;
+    }
+  };
   for (const a of artifacts) {
-    const hit = isAbsolute(a) ? existsSync(a) : roots.some((r) => existsSync(join(r, a)));
+    const hit = isAbsolute(a) ? present(a) : roots.some((r) => present(join(r, a)));
     if (!hit) missing.push(a);
   }
   if (missing.length === 0) return { ok: true };
   const shown = missing.slice(0, 3).join("、");
-  return { ok: false, note: `自报产物不存在（两阶段 done 产物侧校验）：${shown}${missing.length > 3 ? ` 等 ${missing.length} 项` : ""}` };
+  return { ok: false, note: `自报产物不存在或为空（两阶段 done 产物侧校验）：${shown}${missing.length > 3 ? ` 等 ${missing.length} 项` : ""}` };
 }
 
 /**

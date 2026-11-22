@@ -55,7 +55,7 @@ genpi --demo-run         # 无模型演示模式
 - **过程可观测（/genpi log [n]）**：查看当前/最近 run 的转移史尾部——路由决策（路径/分级/豁免/承接）、状态推进、预算消耗、验证失败诊断全程留痕，一步一账。
 - **中断与废弃**：步骤流式期间按 `escape` 中断当前步骤（不扣预算，run 保留可续跑）；`/genpi-stop` 废弃当前 run（台账保留，可 `--resume`）。
 - **模型角色**：`.genpi/config.json` 可配 `models.implementer` / `models.reviewer` / `models.router`（如 `"prov/model-id"`），对应状态自动切换（router 为路由分类小快模型，降延迟与成本）；其余状态跟随 TUI 里 `/model` 当前选择，缺省用全局默认。环境变量凭证（`ANTHROPIC_API_KEY` 等）无需 auth.json 也可直接使用。
-- **证据强制（v1.10）**：VERIFY 自报命令与真实执行交叉校验之上，恒真式构造（`npm test || true` 等）机器拒绝；tasks.md 验收命令升格为固定验收命令（pinned），模型无权自选/省略/替换；自报产物存在性校验——未落盘的产物进不了门禁。
+- **证据强制（v1.10+）**：VERIFY 自报命令与真实执行交叉校验之上，恒真式构造（`npm test || true` 等）与平凡命令（`echo ok`/`true` 等恒 exit 0）机器拒绝，管道需 `set -o pipefail `set -o pipefail && ` 前缀`set -o pipefail && ` 前缀`（注意尾随空格）放行；tasks.md 验收命令升格为固定验收命令（pinned），模型无权自选/省略/替换，含恒真式/平凡命令的验收被剔除时聊天流实时警告；自报产物存在且非空——未落盘/空文件进不了门禁。
 - **成本与清理可见（v1.10）**：每步 token 用量落台账（步末摘要与 `/genpi log` 可见）；`genpi clean [--force]` 清理终态 run 的 worktree/分支（干跑列示，台账保留；未推送远端的分支自动保留防丢）；`worktreeSetup` 配置项解决新 worktree 依赖引导（如 `"npm ci"`）。
 - **codemode 沙箱脚本（v1.10）**：步骤会话已启用 pi 的 codemode 工具——批量机械操作（跨文件重命名、批量格式化、重复结构改写）由模型写脚本一次完成，嵌套工具调用不进上下文，长任务显著省 token；脚本内 bash 仍走工具管道，证据校验照常生效。
 - **验证失败自动诊断（契约 23）**：VERIFY 失败不盲目重试——自动转 DEBUG 诊断（定位根因、产出修复方案），回修复态带着诊断修，修好再验；3 轮修不好如实停下转人工。
@@ -70,7 +70,7 @@ genpi --demo-run         # 无模型演示模式
 └── runs/<runId>/            # design.md · tasks.md · run.json · phase-history.jsonl
 ```
 
-feature/bugfix 在 `.worktrees/<runId>/` 隔离分支上实施，主工作树零污染；`GATE_MR` 批准后推送分支并建 MR（无 gh 时降级为 push + compare URL）。
+feature/bugfix 在 `.worktrees/<runId>/` 隔离分支上实施，主工作树零污染；`GATE_MR` 批准后推送分支并建 MR——描述由 `mr-body.md` 富化（需求原话/路径/分级/产物指路，无 gh 时降级为 push + compare URL）。
 
 ## 路径
 
@@ -84,7 +84,7 @@ feature/bugfix 在 `.worktrees/<runId>/` 隔离分支上实施，主工作树零
 ## 开发
 
 ```bash
-npm test            # 112 用例（引擎/路由/风险分级/证据强制/产物校验/台账原子写/清理防丢/上下文连续性/TUI 纯函数/E2E/扩展透传等）
+npm test            # 116 用例（引擎/路由/风险分级/证据强制+平凡命令审计/原子单活跃/台账原子写/清理防丢/上下文连续性/TUI 纯函数/E2E/扩展透传等）
 npm run build       # tsup → dist/（源码改动后必须重建——genpi 命令运行 dist，未重建会静默跑旧代码；bin 自带过期警告）
 npm run check:resources   # 方法论资源无项目耦合残留
 ```

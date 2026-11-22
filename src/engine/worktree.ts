@@ -46,9 +46,12 @@ export function createGitOps(exec: ExecFn, opts: GitOpsOptions = {}): GitOps {
         const shaR = await exec(dir, "git rev-parse HEAD");
         return { path: dir, baseSha: shaR.code === 0 ? shaR.out.trim() : undefined, created: false };
       }
-      // 已存在（中断恢复）：复用（基线未知，预览退回 HEAD~1）；created=false——不重复依赖引导（T38/C4）
+      // 已存在（中断恢复）：复用（补 rev-parse 当前 HEAD 作 baseSha——GATE_MR 预览不再退回 HEAD~1 猜基线）；created=false——不重复依赖引导（T38/C4）
       const reuse = await exec(projectRoot, `git worktree list --porcelain`);
-      if (reuse.out.includes(dir)) return { path: dir, baseSha: undefined, created: false };
+      if (reuse.out.includes(dir)) {
+        const shaR = await exec(dir, "git rev-parse HEAD");
+        return { path: dir, baseSha: shaR.code === 0 ? shaR.out.trim() : undefined, created: false };
+      }
       throw new Error(`worktree 创建失败: ${r.out}`);
     },
 
@@ -92,7 +95,9 @@ export function createGitOps(exec: ExecFn, opts: GitOpsOptions = {}): GitOps {
       if (ghOk.code !== 0) return { mode: "manual", url: compare };
       const mr = await exec(
         worktreeDir,
-        `"${gh}" pr create --title "${o.summary.replace(/"/g, "'")}" --body "由 genpi 生成"`,
+        o.bodyFile
+          ? `"${gh}" pr create --title "${o.summary.replace(/"/g, "'")}" --body-file "${o.bodyFile}"`
+          : `"${gh}" pr create --title "${o.summary.replace(/"/g, "'")}" --body "由 genpi 生成"`,
       );
       if (mr.code !== 0) return { mode: "manual", url: compare };
       const url = mr.out.trim().split("\n").filter((l) => l.startsWith("http")).at(-1);
