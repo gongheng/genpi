@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -54,9 +54,14 @@ function makeWorld(handler: FakeRunner["handler"], request = "加定时发布") 
     models: {},
   };
   const resources: ResourceProvider = { byState: (s) => [`方法论:${s}`], preamble: () => "常驻约束" };
+  const wtSeen = new Set<string>(); // P0 resume 补建：fake worktree 目录真建出来（existsSync 可判），复用/挂回 created=false
   const git: GitOps = {
     async ensureWorktree(root, runId) {
-      return { path: join(root, ".worktrees", runId), baseSha: "f".repeat(40), created: true };
+      const path = join(root, ".worktrees", runId);
+      const created = !wtSeen.has(runId);
+      wtSeen.add(runId);
+      mkdirSync(path, { recursive: true });
+      return { path, baseSha: "f".repeat(40), created };
     },
     async setup(worktreeDir, command) {
       setupCalls.push({ worktreeDir, command });
@@ -619,5 +624,67 @@ describe("IMPLEMENT 逐任务循环", () => {
     expect(fin?.usage).toEqual({ input: 12000, output: 3400 });
     const hist = readFileSync(join(w.projectRoot, ".genpi", "runs", (w.events.find((e) => e.type === "state_entered") as { runId: string }).runId, "phase-history.jsonl"), "utf8");
     expect(hist).toContain("in 12.0k/out 3.4k tok");
+  });
+
+  it("㉚ P0 start 时 worktree 创建失败：run 置 stopped 落史留 resume 出路，不留孤儿 active 卡死后续 start", async () => {
+    const w = makeWorld(() => ({ result: ok() }));
+    const realGit = w.deps.git;
+    w.deps.git = {
+      ...realGit,
+      ensureWorktree: async () => {
+        throw new Error("boom: worktree 创建失败");
+      },
+    };
+    const engine = new LoopEngine(w.deps);
+    await expect(engine.start("feature", w.request)).rejects.toThrow("boom");
+    const runs = await w.deps.ledger.listRuns(w.projectRoot);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.status).toBe("stopped"); // 不留孤儿 active
+    const runDir = join(w.projectRoot, ".genpi", "runs", runs[0]!.id);
+    const hist = readFileSync(join(runDir, "phase-history.jsonl"), "utf8");
+    expect(hist).toContain("worktree_failed");
+    expect(w.events.some((e) => e.type === "run_stopped")).toBe(true);
+    // 修复后新 run 可正常 start（不再抛 GenpiActiveRunError）
+    w.deps.git = realGit;
+    const runId2 = await new LoopEngine(w.deps).start("feature", "修复后的新需求");
+    expect(w.events.some((e) => e.type === "state_entered" && (e as { runId: string }).runId === runId2)).toBe(true);
+  });
+
+  it("㉛ P0 resume 补 worktree（契约 5）：目录被清后重新 ensure 挂回落账；挂回不重复跑 setup；research 不 ensure", async () => {
+    const w = makeWorld((spec) => (spec.state === "DESIGN" ? { result: ok(["design.md"]) } : { result: ok() }));
+    w.config.worktreeSetup = "npm ci";
+    const ensureCalls: string[] = [];
+    const realEnsure = w.deps.git.ensureWorktree.bind(w.deps.git);
+    w.deps.git = {
+      ...w.deps.git,
+      ensureWorktree: async (root, runId, prefix, dir) => {
+        ensureCalls.push(runId);
+        return realEnsure(root, runId, prefix, dir);
+      },
+    };
+    const engine = new LoopEngine(w.deps);
+    const runId = await engine.start("feature", w.request); // 到 GATE_DESIGN，ensure 一次 + setup 一次
+    expect(ensureCalls).toHaveLength(1);
+    expect(w.setupCalls.length).toBe(1);
+    await engine.stop(runId, "测试搁置");
+    const runDir = join(w.projectRoot, ".genpi", "runs", runId);
+    const rec = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+    rmSync(rec.worktree, { recursive: true, force: true }); // 模拟 genpi clean 保留分支、目录被清
+    w.events.length = 0;
+    await new LoopEngine(w.deps).resume(runId); // stopped 停在 GATE_DESIGN → 重开门禁前先补建挂回
+    expect(ensureCalls).toHaveLength(2); // 重新 ensure（挂回既有分支，created=false）
+    expect(w.setupCalls.length).toBe(1); // 挂回不算新建，不重复依赖引导
+    const rec2 = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+    expect(rec2.worktree).toBe(join(w.projectRoot, ".worktrees", runId)); // 补建落账
+    expect(existsSync(rec2.worktree)).toBe(true);
+    expect(w.events.at(-1)?.type).toBe("gate_opened"); // 补建后照常重开门禁
+    // research 无 worktree：resume 不 ensure
+    const w2 = makeWorld(() => ({ result: ok() }));
+    let ensureCount = 0;
+    const re2 = w2.deps.git.ensureWorktree.bind(w2.deps.git);
+    w2.deps.git = { ...w2.deps.git, ensureWorktree: async (root, id, p, d) => (ensureCount++, re2(root, id, p, d)) };
+    const rid2 = await new LoopEngine(w2.deps).start("research", "纯调研");
+    await new LoopEngine(w2.deps).resume(rid2).catch(() => undefined); // 已 done 会抛（不可恢复）
+    expect(ensureCount).toBe(0);
   });
 });

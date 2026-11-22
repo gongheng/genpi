@@ -35,14 +35,21 @@ export function createGitOps(exec: ExecFn, opts: GitOpsOptions = {}): GitOps {
       const dir = join(projectRoot, worktreeDir, runId);
       const branch = `${branchPrefix}${runId}`;
       const r = await exec(projectRoot, `git worktree add "${dir}" -b "${branch}"`);
-      if (r.code !== 0) {
-        // 已存在（中断恢复）：复用（基线未知，预览退回 HEAD~1）；created=false——不重复依赖引导（T38/C4）
-        const reuse = await exec(projectRoot, `git worktree list --porcelain`);
-        if (reuse.out.includes(dir)) return { path: dir, baseSha: undefined, created: false };
-        throw new Error(`worktree 创建失败: ${r.out}`);
+      if (r.code === 0) {
+        const shaR = await exec(dir, "git rev-parse HEAD");
+        return { path: dir, baseSha: shaR.code === 0 ? shaR.out.trim() : undefined, created: true };
       }
-      const shaR = await exec(dir, "git rev-parse HEAD");
-      return { path: dir, baseSha: shaR.code === 0 ? shaR.out.trim() : undefined, created: true };
+      // 目录已注册但分支已存在（中断恢复/目录被清但分支保留）：prune 掉失效注册后挂回既有分支
+      await exec(projectRoot, "git worktree prune");
+      const reattach = await exec(projectRoot, `git worktree add "${dir}" "${branch}"`);
+      if (reattach.code === 0) {
+        const shaR = await exec(dir, "git rev-parse HEAD");
+        return { path: dir, baseSha: shaR.code === 0 ? shaR.out.trim() : undefined, created: false };
+      }
+      // 已存在（中断恢复）：复用（基线未知，预览退回 HEAD~1）；created=false——不重复依赖引导（T38/C4）
+      const reuse = await exec(projectRoot, `git worktree list --porcelain`);
+      if (reuse.out.includes(dir)) return { path: dir, baseSha: undefined, created: false };
+      throw new Error(`worktree 创建失败: ${r.out}`);
     },
 
     async setup(worktreeDir, command) {
@@ -133,7 +140,9 @@ export function planCleanup(
   });
 }
 
-/** 执行清理：worktree remove（含未提交时 --force 兜底）→ branch -D；单条失败不阻断其余。 */
+/** 执行清理：防丢检查→worktree remove→branch -D；单条失败不阻断其余。
+ * 防丢（P0）：分支 tip 未被任何远端引用包含（未推送/推送失败）时，commits 只存在于本地——
+ * 删除即永久丢失（push 降级 manual 的 done run、中断的 stopped run 都会命中），整条保留并报出路。 */
 export async function executeCleanup(
   exec: ExecFn,
   projectRoot: string,
@@ -142,13 +151,27 @@ export async function executeCleanup(
   const results: { runId: string; ok: boolean; note: string }[] = [];
   for (const e of entries) {
     const notes: string[] = [];
+    // 防丢检查：branch -r --contains 为空 = tip 不在任何远端分支上（命令失败同样按未推送保守处理）
+    const rc = await exec(projectRoot, `git branch -r --contains "${e.branch}"`);
+    const pushed = rc.code === 0 && rc.out.trim().length > 0;
+    if (!pushed) {
+      results.push({
+        runId: e.runId,
+        ok: false,
+        note: e.dirExists
+          ? `⚠ 分支未推送远端（含未交付工作，防丢保留）：worktree 与分支均保留；确认放弃请手动 git worktree remove --force "${e.worktree}" && git branch -D "${e.branch}"，或先 push 保留交付`
+          : `⚠ 分支未推送远端（防丢保留）：分支保留；确认放弃请手动 git branch -D "${e.branch}"，或先 push 保留交付`,
+      });
+      continue;
+    }
     if (e.dirExists) {
       const rm = await exec(projectRoot, `git worktree remove "${e.worktree}"`);
       if (rm.code === 0) {
         notes.push("worktree 已删");
       } else {
+        // 脏 worktree：--force 丢弃的只有未提交变更（提交已在远端，GATE_MR 门禁期已警告过）
         const rmf = await exec(projectRoot, `git worktree remove --force "${e.worktree}"`);
-        notes.push(rmf.code === 0 ? "worktree 已删（含未提交变更）" : `worktree 删除失败：${(rmf.out || rm.out).slice(-80)}`);
+        notes.push(rmf.code === 0 ? "worktree 已删（含未提交变更；提交已在远端）" : `worktree 删除失败：${(rmf.out || rm.out).slice(-80)}`);
       }
     } else notes.push("worktree 已不存在");
     const br = await exec(projectRoot, `git branch -D "${e.branch}"`);

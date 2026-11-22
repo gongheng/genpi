@@ -138,7 +138,7 @@ async function cleanCli(argv: string[], projectRoot: string): Promise<number> {
   if (!force) {
     console.log(`可清理 ${plan.length} 个终态 run 的 worktree/分支（台账 .genpi/runs 保留）：`);
     for (const e of plan) console.log(`  - ${e.runId} [${e.status}] ${e.worktree}${e.dirExists ? "" : "（目录已不存在，仅删分支）"}`);
-    console.log("\n确认后执行：genpi clean --force");
+    console.log("\n确认后执行：genpi clean --force（执行时未推送远端的分支会自动保留，防丢）");
     return 0;
   }
   const results = await executeCleanup(createShellExec(), projectRoot, plan);

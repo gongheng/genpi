@@ -135,6 +135,7 @@ describe("worktree + MR", () => {
     const cmds: string[] = [];
     const exec: ExecFn = async (_cwd, cmd) => {
       cmds.push(cmd);
+      if (cmd.includes("branch -r --contains")) return { code: 0, out: "origin/main\n" }; // 已推送：可安全清理
       if (cmd.includes('worktree remove "/w/a"')) return { code: 1, out: "dirty" }; // 首次 remove 失败→--force
       if (cmd.includes('branch -D "/w/x-br"')) return { code: 1, out: "no branch" }; // 分支删除失败
       return { code: 0, out: "" };
@@ -148,5 +149,71 @@ describe("worktree + MR", () => {
     expect(results[0]?.ok).toBe(true); // force 兜底成功
     expect(results[0]?.note).toContain("含未提交变更");
     expect(results[1]?.ok).toBe(false); // 分支删除失败不阻断其余
+  });
+
+  it("⑥b P0 防丢：分支未推送远端（含检查命令失败）→ worktree 与分支均保留，note 给出手动出路", async () => {
+    const cmds: string[] = [];
+    const exec: ExecFn = async (_cwd, cmd) => {
+      cmds.push(cmd);
+      if (cmd.includes('branch -r --contains "feature/a"')) return { code: 0, out: "" }; // 未被任何远端包含
+      if (cmd.includes('branch -r --contains "feature/b"')) return { code: 128, out: "no such commit" }; // 命令失败→保守按未推送
+      return { code: 0, out: "" };
+    };
+    const results = await executeCleanup(exec, "/proj", [
+      { runId: "a", status: "stopped", worktree: "/w/a", branch: "feature/a", dirExists: true },
+      { runId: "b", status: "done", worktree: "/w/b", branch: "feature/b", dirExists: false },
+    ]);
+    expect(results.every((r) => !r.ok)).toBe(true); // 两条均保留（需人工确认）
+    expect(results[0]?.note).toContain("防丢保留");
+    expect(results[0]?.note).toContain("git worktree remove --force"); // 出路可执行
+    expect(results[1]?.note).toContain("git branch -D");
+    // 不应出现任何删除动作
+    expect(cmds.some((c) => c.includes("worktree remove"))).toBe(false);
+    expect(cmds.some((c) => c.includes("branch -D"))).toBe(false);
+  });
+
+  it("⑦ P0 防丢（真实 git）：未推送分支 clean 保留（worktree+分支），push 后可清", async () => {
+    const { project } = makeRepo();
+    const exec = createShellExec();
+    const ops = createGitOps(exec);
+    const runId = "20260214-1700-feature-keep";
+    const wt = await ops.ensureWorktree(project, runId, "feature/", ".worktrees/");
+    writeFileSync(join(wt.path, "work.txt"), "w\n");
+    sh(`git add -A && git commit -m work`, wt.path);
+    const plan = () =>
+      planCleanup([{ id: runId, status: "stopped", worktree: wt.path }], {
+        worktreeDir: ".worktrees/",
+        branchPrefix: "feature/",
+        existsCheck: (p) => existsSync(p),
+      });
+    // 未推送：worktree 与分支均保留（stopped 可续跑，提交未上远端）
+    const r1 = await executeCleanup(exec, project, plan());
+    expect(r1[0]?.ok).toBe(false);
+    expect(r1[0]?.note).toContain("防丢保留");
+    expect(existsSync(wt.path)).toBe(true);
+    expect(execSync(`git -C ${JSON.stringify(project)} rev-parse --verify "feature/${runId}"`, { encoding: "utf8", stdio: "pipe" }).trim()).toMatch(/^[0-9a-f]{7,40}$/);
+    // push 后：可清（提交已在远端，--force 只可能丢未提交变更）
+    sh(`git -C ${JSON.stringify(wt.path)} push -u origin "feature/${runId}"`);
+    const r2 = await executeCleanup(exec, project, plan());
+    expect(r2[0]?.ok).toBe(true);
+    expect(existsSync(wt.path)).toBe(false);
+  });
+
+  it("⑧ P0 resume 补建挂回：目录被清但分支保留时，ensureWorktree 挂回既有分支（created=false，工作不丢）", async () => {
+    const { project } = makeRepo();
+    const exec = createShellExec();
+    const ops = createGitOps(exec);
+    const runId = "20260214-1730-feature-reattach";
+    const wt1 = await ops.ensureWorktree(project, runId, "feature/", ".worktrees/");
+    writeFileSync(join(wt1.path, "w.txt"), "w\n");
+    sh(`git add -A && git commit -m w`, wt1.path);
+    const tip = execSync(`git -C ${JSON.stringify(wt1.path)} rev-parse HEAD`, { encoding: "utf8", stdio: "pipe" }).trim();
+    rmSync(wt1.path, { recursive: true, force: true }); // 模拟目录被清（分支仍在）
+    sh(`git -C ${JSON.stringify(project)} worktree prune`);
+    const wt2 = await ops.ensureWorktree(project, runId, "feature/", ".worktrees/");
+    expect(wt2.created).toBe(false); // 挂回≠新建：不重复依赖引导（T38/C4）
+    expect(existsSync(wt2.path)).toBe(true);
+    const tip2 = execSync(`git -C ${JSON.stringify(wt2.path)} rev-parse HEAD`, { encoding: "utf8", stdio: "pipe" }).trim();
+    expect(tip2).toBe(tip); // 挂回的是既有分支（提交未丢）
   });
 });

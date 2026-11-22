@@ -1,5 +1,5 @@
 // 台账：<项目根>/.genpi/runs/<runId>/（run.json + phase-history.jsonl）——契约 2/12
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { CommandEvidence, PathId, RunId, RunRecord } from "../types";
 
@@ -68,7 +68,7 @@ export function createFsLedger(now: () => Date = () => new Date()): Ledger {
         createdTs: now().toISOString(),
         sessionIds: [],
       };
-      await writeFile(join(dir, "run.json"), JSON.stringify(rec, null, 2));
+      await writeFile(join(dir, "run.json"), JSON.stringify(rec, null, 2)); // 首建无旧文件可损坏；后续一律走 writeRun 原子替换
       return { runId, runDir: dir };
     },
     async runDir(projectRoot, runId) {
@@ -96,13 +96,17 @@ export function createFsLedger(now: () => Date = () => new Date()): Ledger {
       return JSON.parse(await readFile(join(runDir, "run.json"), "utf8")) as RunRecord;
     },
     async writeRun(runDir, rec) {
-      await writeFile(join(runDir, "run.json"), JSON.stringify(rec, null, 2));
+      // 原子写（P0）：先写 tmp 再 rename——writeFile 直接覆盖在写入中途被杀会留半截 JSON，
+      // 台账损坏则契约 7「进程随便杀重启即续」失效；rename 在 POSIX/Windows 上均原子替换
+      const tmp = join(runDir, "run.json.tmp");
+      await writeFile(tmp, JSON.stringify(rec, null, 2));
+      await rename(tmp, join(runDir, "run.json"));
     },
     async appendHistory(runDir, entry) {
-      await writeFile(join(runDir, "phase-history.jsonl"), JSON.stringify(entry) + "\n", { flag: "a" });
+      await writeFile(join(runDir, "phase-history.jsonl"), `${JSON.stringify(entry)}\n`, { flag: "a" });
     },
     async appendConversation(projectRoot, line) {
-      await writeFile(join(projectRoot, ".genpi", "conversation.md"), line + "\n", { flag: "a" });
+      await writeFile(join(projectRoot, ".genpi", "conversation.md"), `${line}\n`, { flag: "a" });
     },
     async recentConversation(projectRoot, n = 5) {
       try {

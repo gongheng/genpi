@@ -110,7 +110,7 @@
 ```bash
 # 源码开发
 npm install && npm run build && npm link
-npm test                     # 105 用例（引擎/路由/风险分级/证据强制/TUI 纯函数/E2E/扩展），全 mock 无需凭证
+npm test                     # 112 用例（引擎/路由/风险分级/证据强制/TUI 纯函数/E2E/扩展），全 mock 无需凭证
 npm run check:resources      # 方法论无项目耦合残留
 
 # 体验（无模型凭证也能看交互）
@@ -196,7 +196,7 @@ while (rec.status === "active") {
 
 ### 5.5 worktree 隔离与生命周期（worktree.ts）
 
-feature/bugfix 在 `.worktrees/<runId>/` 建独立分支（前缀 `feature/`），主工作树零污染；`baseSha` 记入 run.json 供 GATE_MR 预览 diff。`ensureWorktree` 返回 `created` 标志：新建后按需执行 `worktreeSetup` 配置命令（如 `npm ci`）——新 worktree 无 gitignored 依赖，不引导则首次 VERIFY 必白烧一轮 budget+DEBUG 才发现「依赖没装」（v1.10；失败告警不阻塞）。`mrPreview()` 机器检查**提交完整性**：零提交（MR 将为空）或 worktree 有未提交变更（push 不含）→ 预览顶部警告。`pushAndMr()`：有 `gh` → 建 MR；无 → push + compare URL 降级。终态 run 的 worktree/分支用 `genpi clean [--force]` 清理（干跑列示，台账永久保留）。genpi 永不改 `.gitignore`/git 配置（契约 8）。
+feature/bugfix 在 `.worktrees/<runId>/` 建独立分支（前缀 `feature/`），主工作树零污染；`baseSha` 记入 run.json 供 GATE_MR 预览 diff。`ensureWorktree` 返回 `created` 标志：新建后按需执行 `worktreeSetup` 配置命令（如 `npm ci`）——新 worktree 无 gitignored 依赖，不引导则首次 VERIFY 必白烧一轮 budget+DEBUG 才发现「依赖没装」（v1.10；失败告警不阻塞）。目录被清但分支保留时自动挂回既有分支（`created=false`，resume 补建用）。`mrPreview()` 机器检查**提交完整性**：零提交（MR 将为空）或 worktree 有未提交变更（push 不含）→ 预览顶部警告。`pushAndMr()`：有 `gh` → 建 MR；无 → push + compare URL 降级。终态 run 的 worktree/分支用 `genpi clean [--force]` 清理（干跑列示，台账永久保留）；**防丢检查**：分支 tip 未被任何远端引用包含（未推送/推送降级/中断的 run）时 worktree 与分支均自动保留并给出手动出路——本地未推送提交永不因 clean 丢失。genpi 永不改 `.gitignore`/git 配置（契约 8）。
 
 ### 5.6 TUI 编排（tui/app.ts）——薄桥的设计
 
@@ -236,13 +236,14 @@ feature/bugfix 在 `.worktrees/<runId>/` 建独立分支（前缀 `feature/`）�
 
 ---
 
-## 7. 测试地图（105 用例，全部无需真模型）
+## 7. 测试地图（112 用例，全部无需真模型）
 
 | 测试文件 | 覆盖 | 怎么 mock |
 | --- | --- | --- |
-| `engine.test.ts`（30） | ★drive 循环全语义：四路径转移/GATE 死等/budget 连续语义（交错重置）/request_changes 不扣/steering/resume（含承接重建）/中断/搁置不毒死新 run/T0 短链/T2 注入/prd 循环/CLARIFY 豁免/标题落账/pinned 接线/worktreeSetup/用量落账 | StepRunner 全 mock（makeWorld） |
+| `engine.test.ts`（32） | ★drive 循环全语义：四路径转移/GATE 死等/budget 连续语义（交错重置）/request_changes 不扣/steering/resume（含承接重建与补建 worktree）/中断/搁置不毒死新 run/T0 短链/T2 注入/prd 循环/CLARIFY 豁免/标题落账/pinned 接线/worktreeSetup/用量落账/worktree 失败置 stopped | StepRunner 全 mock（makeWorld） |
 | `step-runner.test.ts`（13） | SDK seam：注入装载/证据交叉校验（伪造 exitCode→fail）/恒真式审计拒绝与放行清单/pinned 三情形/产物存在性/用量聚合 | `setSessionFactoryForTest` |
-| `worktree.test.ts`（7） | 真实 git 仓：worktree 隔离/mrPreview/提交完整性警告/planCleanup+executeCleanup（干跑与执行） | 玩具 git 仓/fake exec |
+| `worktree.test.ts`（10） | 真实 git 仓：worktree 隔离/挂回既有分支/mrPreview/提交完整性警告/planCleanup+executeCleanup（干跑与执行，未推送分支防丢保留） | 玩具 git 仓/fake exec |
+| `ledger.test.ts`（1） | 台账原子写：tmp+rename 无残留、后写为准（契约 7 落盘底座） | 临时目录 |
 | `e2e-headless.test.ts`（3） | 垂直切片：feature 全循环四件产物/push 降级/单活跃 | fake runner+玩具仓 |
 | `tui.test.ts` + `screens.test.ts`（17） | 纯函数：routeUserInput 分流/parseGateCommand/渲染（含用量展示） | 无 mock（纯函数） |
 | `router/config/ext-manager/extensions/resources`（35） | 四分类路由/tier 启发式/豁免判定/标题生成/routerModel 穿插/三级配置（worktreeSetup、models.router）/扩展管理/装载/资源 | 各自 seam |

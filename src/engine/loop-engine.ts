@@ -3,7 +3,7 @@
 import { basename, join } from "node:path";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { ResolvedConfig } from "../config";
-import type { EngineEvent, GateDecision, PathId, RunId, StateId, StepEvent, StepResult, StepRunner, StepSpec, Tier } from "../types";
+import type { EngineEvent, GateDecision, PathId, RunId, RunRecord, StateId, StepEvent, StepResult, StepRunner, StepSpec, Tier } from "../types";
 import type { Ledger } from "./ledger";
 import { chainFor, PATHS, type PathDef } from "./paths";
 import { extractAcceptanceCommands, parseUnchecked, tick } from "./tasks";
@@ -112,19 +112,12 @@ export class LoopEngine {
     await this.deps.ledger.writeRun(runDir, rec);
     onCreated?.(runId); // runId 在 drive 前即回调：调用方（TUI）在初始 drive 期间即可响应 escape/steering
     if (def.needsWorktree) {
-      const wt = await this.deps.git.ensureWorktree(this.deps.projectRoot, runId, this.deps.config.branchPrefix, this.deps.config.worktreeDir);
-      rec.worktree = wt.path;
-      rec.baseSha = wt.baseSha;
-      await this.deps.ledger.writeRun(runDir, rec);
-      // T38/C4：新 worktree 无 gitignored 依赖（node_modules 等）——首次创建后跑用户配置的引导命令，
-      // 否则第一次 VERIFY 必白烧一轮 budget + DEBUG 循环才发现「依赖没装」；失败告警不阻塞（网络抖动不该拦死循环）
-      if (wt.created && this.deps.config.worktreeSetup) {
-        const s = await this.deps.git.setup(wt.path, this.deps.config.worktreeSetup);
-        await this.deps.ledger.appendHistory(runDir, {
-          ts: now(),
-          from: "INIT", to: "INIT", event: "worktree_setup",
-          note: s.code === 0 ? this.deps.config.worktreeSetup : `引导失败(exit ${s.code})，后续验证可能因依赖缺失失败：${s.out.slice(-140)}`,
-        });
+      try {
+        await this.#ensureRunWorktree(runId, runDir, rec, def);
+      } catch (e) {
+        // 失败不留孤儿 active（会卡死后续 start），也不让 drive 回落主树实施（违反契约 5）——置 stopped 留 resume 出路
+        await this.#stopForWorktreeFailure(runId, runDir, rec, e);
+        throw e; // 调用方（TUI）自报 ⚠
       }
     }
     await this.drive(runDir, def);
@@ -145,6 +138,17 @@ export class LoopEngine {
       }
     }
     const def = PATHS[rec.path];
+    // 契约 5（P0 补全）：代码路径 resume 时必须有可用 worktree——缺失（start 中途失败的孤儿 run）
+    // 或目录已被清（genpi clean 防丢保留了分支）都补建挂回；失败置 stopped 留 resume 出路，防 IMPLEMENT 落主树
+    if (def.needsWorktree && (!rec.worktree || !existsSync(rec.worktree))) {
+      rec.worktree = undefined;
+      try {
+        await this.#ensureRunWorktree(runId, runDir, rec, def);
+      } catch (e) {
+        await this.#stopForWorktreeFailure(runId, runDir, rec, e);
+        throw e;
+      }
+    }
     if (rec.status === "done" || rec.status === "rejected") throw new Error(`run ${runId} 状态 ${rec.status} 不可恢复`);
     if (rec.status === "gate" || (rec.status === "stopped" && def.gates[rec.currentState])) {
       // stopped 停在门禁态同样重开（契约 19：转 stopped 可续跑，v1.8 修正与提示语/README 的一致性）
@@ -233,6 +237,33 @@ export class LoopEngine {
     await this.deps.ledger.appendHistory(runDir, { ts: now(), from: rec.currentState, to: rec.currentState, event: "stopped", note: reason });
     await this.#logConversation(runId, rec.path, rec.request, "stopped", reason);
     this.deps.emit({ type: "run_stopped", runId, reason }); // 「可 --resume 续跑」提示由展示层统一追加，防重复拼接
+  }
+
+  /** 契约 5：代码路径必须有隔离 worktree（start/resume 共用）。缺失时补建；成功后落账。 */
+  async #ensureRunWorktree(runId: RunId, runDir: string, rec: RunRecord, def: PathDef): Promise<void> {
+    if (!def.needsWorktree || rec.worktree) return;
+    const wt = await this.deps.git.ensureWorktree(this.deps.projectRoot, runId, this.deps.config.branchPrefix, this.deps.config.worktreeDir);
+    rec.worktree = wt.path;
+    rec.baseSha = wt.baseSha;
+    await this.deps.ledger.writeRun(runDir, rec);
+    // T38/C4：新 worktree 无 gitignored 依赖（node_modules 等）——首次创建后跑用户配置的引导命令，
+    // 否则第一次 VERIFY 必白烧一轮 budget + DEBUG 循环才发现「依赖没装」；失败告警不阻塞（网络抖动不该拦死循环）
+    if (wt.created && this.deps.config.worktreeSetup) {
+      const s = await this.deps.git.setup(wt.path, this.deps.config.worktreeSetup);
+      await this.deps.ledger.appendHistory(runDir, {
+        ts: now(),
+        from: "INIT", to: "INIT", event: "worktree_setup",
+        note: s.code === 0 ? this.deps.config.worktreeSetup : `引导失败(exit ${s.code})，后续验证可能因依赖缺失失败：${s.out.slice(-140)}`,
+      });
+    }
+  }
+
+  /** worktree 补建失败：置 stopped（防孤儿 active 卡死后续 start）+ 落史 + run_stopped，留 --resume 出路。 */
+  async #stopForWorktreeFailure(runId: RunId, runDir: string, rec: RunRecord, e: unknown): Promise<void> {
+    rec.status = "stopped";
+    await this.deps.ledger.writeRun(runDir, rec);
+    await this.deps.ledger.appendHistory(runDir, { ts: now(), from: rec.currentState, to: rec.currentState, event: "worktree_failed", note: String(e).slice(0, 160) });
+    this.deps.emit({ type: "run_stopped", runId, reason: "worktree 创建失败（run 已转 stopped，修复后可 --resume 续跑）" });
   }
 
   private async drive(runDir: string, def: PathDef): Promise<void> {
