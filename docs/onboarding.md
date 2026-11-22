@@ -205,7 +205,7 @@ feature/bugfix 在 `.worktrees/<runId>/` 建独立分支（前缀 `feature/`）�
 
 复用 pi `InteractiveMode`（不自绘），genpi 以**内联扩展**接入，只做三件事：
 
-1. **接管输入**：`pi.on("input")` 返回 `{action:"handled"}` → 纯函数 `routeUserInput()` 分流——**待答问题 > 门禁命令 > 挂起续跑 > 新循环(engine.start) > 运行中(steer)**；门禁命令解析 `parseGateCommand()`（a/c/r/p）。分流逻辑全部纯函数可测（tui.test）。**关键纪律（T37）**：input handler 必须同步返回——`engine.start` 后台驱动（`void + .catch`），绝不在 await 链上等引擎（否则 pi 主循环被首条 prompt 吊死，后续输入落入 pendingUserInputs 缓冲被静默吞掉——「问答答案被吞」的根因）；闲聊放行走 `sendUserMessage({deliverAs:"followUp"})` 程序化发送（streaming 期排队下一轮，Promise.resolve 桥接挂 catch 防 unhandled rejection）。
+1. **接管输入**：`pi.on("input")` 返回 `{action:"handled"}` → 纯函数 `routeUserInput()` 分流——**待答问题 > 门禁命令 > 挂起续跑 > 新循环(engine.start) > 运行中(steer)**；门禁命令解析 `parseGateCommand()`（a/c/r/p）。分流逻辑全部纯函数可测（tui.test）。`genpi/user` 回显用 pi 原生 `UserMessageComponent` 渲染——与真用户消息同款视觉（主题 userMessageBg 背景高亮，dark/light 内置主题均已设置），› 前缀区分回显与闲聊透传的原生渲染。**关键纪律（T37）**：input handler 必须同步返回——`engine.start` 后台驱动（`void + .catch`），绝不在 await 链上等引擎（否则 pi 主循环被首条 prompt 吊死，后续输入落入 pendingUserInputs 缓冲被静默吞掉——「问答答案被吞」的根因）；闲聊放行走 `sendUserMessage({deliverAs:"followUp"})` 程序化发送（streaming 期排队下一轮，Promise.resolve 桥接挂 catch 防 unhandled rejection）。
 2. **进度桥**：引擎 emit 的 EngineEvent → `sendMessage`(入聊天流)/`setWidget`(步骤实时尾随)/`setStatus`(footer 常显 `path·STATE`)。
 3. **会话启动钩子**：`session_start` 时 listRuns 找 active/gate/stopped → **仅提示不自动复活**（v1.7 用户主导：回"继续"才续跑；直接输新需求则旧 run 自动搁置）。
 

@@ -368,8 +368,10 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
     pi.registerEntryRenderer("genpi/progress", (entry) =>
       new piSdk.CustomMessageComponent({ role: "custom", customType: "genpi/progress", content: asText(entry.data), display: true, timestamp: Date.parse(entry.timestamp) || Date.now() }),
     );
+    // genpi/user 回显：用 pi 原生 UserMessageComponent——与真用户消息同款视觉（userMessageBg 主题高亮），
+    // › 前缀保留以区分「genpi 回显」与「闲聊透传的原生渲染」（防 T32 式双重渲染混淆）
     pi.registerEntryRenderer("genpi/user", (entry) =>
-      new piSdk.CustomMessageComponent({ role: "custom", customType: "genpi/user", content: asText(entry.data), display: true, timestamp: Date.parse(entry.timestamp) || Date.now() }),
+      new piSdk.UserMessageComponent(asText(entry.data), undefined, 1, [], undefined, entry.timestamp),
     );
     // /genpi-stop：废弃当前 run（台账保留，可 --resume）——卡死时的 TUI 内出口（契约 19）
     pi.registerCommand("genpi-stop", {
