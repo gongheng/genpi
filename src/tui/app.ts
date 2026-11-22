@@ -5,6 +5,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { matchesKey } from "@earendil-works/pi-tui";
 import pkg from "../../package.json" with { type: "json" };
 import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { EngineEvent, GateDecision, PathId, StepRunner } from "../types";
@@ -36,6 +37,15 @@ export function parseGateCommand(input: string): { command: GateCommand; hint?: 
 // ---------- 输入分流（纯函数，测试面） ----------
 
 export type InputPhase = "idle" | "routing" | "run" | "gate" | "awaiting-answer";
+
+/**
+ * ESC 输入判定（纯函数，测试面）：pi-tui matchesKey 同时覆盖 legacy（裸 \x1b）与 Kitty 键盘协议
+ * （\x1b[27u 等）——旧版只比裸 \x1b，而 pi 会启用 Kitty 协议（flags=7），在 Kitty/WezTerm/Ghostty/
+ * 新版 iTerm 等终端 ESC 完全死键（不中断也无提示的根因）；ctrl+ESC 等修饰组合不误判。
+ */
+export function isEscapeInput(data: string): boolean {
+  return matchesKey(data, "escape");
+}
 
 /**
  * escape 归属判定（纯函数，测试面）：run 相位全程中断——含等首 token/建会话/首个动作是长工具
@@ -389,7 +399,7 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
       // escape 中断（契约 19）：run 相位全程接管（escapeAction 纯函数——无流式窗口也能中断，
       // 修复「按 ESC 没反应」）；其余相位透传，保留编辑器的 Esc 语义（补全菜单等）
       ctx.ui.onTerminalInput((data) => {
-        if (data !== "\x1b") return undefined;
+        if (!isEscapeInput(data)) return undefined;
         const act = escapeAction(phase, answerResolver !== null);
         if (act === "abort-step") {
           const accepted = engine.abort(); // 安全：无活跃循环内部 no-op；间隙中断置 pendingAbort 下一 step 边界生效

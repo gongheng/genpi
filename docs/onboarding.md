@@ -110,7 +110,7 @@
 ```bash
 # 源码开发
 npm install && npm run build && npm link
-npm test                     # 127 用例（引擎/路由/风险分级/证据强制/TUI 纯函数/E2E/扩展），全 mock 无需凭证（⑮ 为真实 SDK 事件形状钉子，无模型）
+npm test                     # 128 用例（引擎/路由/风险分级/证据强制/TUI 纯函数/E2E/扩展），全 mock 无需凭证（⑮ 为真实 SDK 事件形状钉子，无模型）
 npm run check:resources      # 方法论无项目耦合残留
 
 # 体验（无模型凭证也能看交互）
@@ -131,7 +131,7 @@ TUI 内交互速查：
 | `继续` / `continue` / `resume` | 续跑挂起的旧循环（stopped/gate 均可，v1.7/v1.8） |
 | `a` / `c <意见>` / `r` / `p` | 门禁期：批准/要求修改/终止/预览审批对象（聊天命令，防误触） |
 | 运行中输入任意文字 | steering：下一 step 边界注入，不跳状态不扣预算 |
-| `escape` | 中断当前步骤（不扣预算，run 转 stopped 可续跑）。**run 相位全程生效**——等首 token/建会话/长工具调用/任务间隙等无流式窗口也可中断（旧版只在流式期生效，「按了没反应」已修）；Q&A 等待期同样生效。启动窗口（worktree 依赖引导执行中）无步骤可断，提示改走 `/genpi-stop` |
+| `escape` | 中断当前步骤（不扣预算，run 转 stopped 可续跑）。**run 相位全程生效**——等首 token/建会话/长工具调用/任务间隙等无流式窗口也可中断；Q&A 等待期同样生效；**兼容 Kitty 键盘协议终端**（ESC 是 `\x1b[27u` 非裸 `\x1b`，经 pi-tui matchesKey 判定——旧裸字节比法在 Kitty/WezTerm/Ghostty/新版 iTerm 下完全死键）。启动窗口（worktree 依赖引导执行中）无步骤可断，提示改走 `/genpi-stop` |
 | `/genpi-stop` | 废弃当前 run（台账保留） |
 | `/genpi log [n]` | 当前/最近 run 转移史尾部（路由/推进/预算/诊断留痕，T30） |
 | `/model` `/theme` 等 | pi 原生命令照常可用 |
@@ -239,7 +239,7 @@ feature/bugfix 在 `.worktrees/<runId>/` 建独立分支（前缀 `feature/`）�
 
 ---
 
-## 7. 测试地图（127 用例，全部无需真模型）
+## 7. 测试地图（128 用例，全部无需真模型）
 
 | 测试文件 | 覆盖 | 怎么 mock |
 | --- | --- | --- |
@@ -248,7 +248,7 @@ feature/bugfix 在 `.worktrees/<runId>/` 建独立分支（前缀 `feature/`）�
 | `worktree.test.ts`（14） | 真实 git 仓：worktree 隔离/挂回既有分支/复用补 baseSha/mrPreview/提交完整性警告/planCleanup+executeCleanup（干跑与执行，未推送分支防丢保留；已删分支仅清 worktree）/pushAndMr body-file/平台匹配才走 gh | 玩具 git 仓/fake exec |
 | `ledger.test.ts`（3） | 台账原子写：tmp+rename 无残留、后写为准；active.lock 原子占位（独占/接管/验主幂等）；conversation 裁剪（bounded 增长） | 临时目录 |
 | `e2e-headless.test.ts`（3） | 垂直切片：feature 全循环四件产物/push 降级/单活跃 | fake runner+玩具仓 |
-| `tui.test.ts` + `screens.test.ts`（20） | 纯函数：routeUserInput 分流/parseGateCommand/escapeAction（run 相位全程可中断）/渲染（含用量展示） | 无 mock（纯函数） |
+| `tui.test.ts` + `screens.test.ts`（21） | 纯函数：routeUserInput 分流/parseGateCommand/isEscapeInput（legacy+Kitty 协议）/escapeAction（run 相位全程可中断）/渲染（含用量展示） | 无 mock（纯函数） |
 | `router/config/ext-manager/extensions/resources`（35） | 四分类路由/tier 启发式/豁免判定/标题生成/routerModel 穿插/三级配置（worktreeSetup、models.router）/扩展管理/装载/资源 | 各自 seam |
 
 测试哲学：**引擎 headless 可测是架构特性**——LoopEngine 不依赖 TUI，事件面（EngineEvent）即测试面；这也是"将来服务化的免费接缝"。

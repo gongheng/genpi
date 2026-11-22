@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { escapeAction, parseGateCommand, routeUserInput, type InputPhase } from "../src/tui/app";
+import { escapeAction, isEscapeInput, parseGateCommand, routeUserInput, type InputPhase } from "../src/tui/app";
 
 describe("门禁命令解析（聊天内 a/c/r）", () => {
   it("① a/批准/通过/approve → 批准", () => {
@@ -51,6 +51,18 @@ describe("输入分流（聊天单输入框的调度核心）", () => {
     expect(r.target).toBe("gate-hint");
     expect(r.hint).toContain("a 批准");
     expect(routeUserInput("idle", null, "   ").target).toBe("ignore");
+  });
+});
+
+describe("ESC 输入判定（legacy + Kitty 键盘协议——Kitty 终端下 ESC 不是裸 \\x1b，旧比法死键）", () => {
+  it("① legacy 裸 ESC 与 Kitty 形式都识别；修饰 ESC/方向键/字符不误判", () => {
+    expect(isEscapeInput("\x1b")).toBe(true); // legacy 终端
+    expect(isEscapeInput("\x1b[27u")).toBe(true); // Kitty 基本形式（pi 默认启用协议，flags=7）
+    expect(isEscapeInput("\x1b[27;1u")).toBe(true); // Kitty 带修饰位（无实际修饰）
+    expect(isEscapeInput("\x1b[27;5u")).toBe(false); // ctrl+ESC：非裸 ESC
+    expect(isEscapeInput("a")).toBe(false);
+    expect(isEscapeInput("\x1b[A")).toBe(false); // 上方向键
+    expect(isEscapeInput("")).toBe(false);
   });
 });
 
