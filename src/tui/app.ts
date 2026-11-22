@@ -252,6 +252,25 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
     void engine.decide(currentRunId, d).catch((e) => say(`⚠ ${String(e)}`));
   }
 
+  /** 废弃当前 run（/genpi-stop 命令与 Q&A 期输入分支共用）：台账兑底找活跃 run，先答挂起问题再 stop（自洽修复）。 */
+  async function stopActiveRun(): Promise<void> {
+    // 台账兑底：resume 失败等场景 currentRunId 可能为空但台账仍有活跃 run（修复死锁）
+    let runId: string | null | undefined = currentRunId;
+    if (!runId) {
+      const active = (await ledger.listRuns(opts.projectRoot)).find((r) => r.status === "active" || r.status === "gate");
+      runId = active?.id;
+    }
+    if (!runId) {
+      uiRef?.notify("当前没有活跃 run", "info");
+      return;
+    }
+    if (answerResolver) {
+      answerResolver("（用户已废弃 run，请停止当前步骤）");
+      answerResolver = null;
+    }
+    await engine.stop(runId);
+  }
+
   function artifactPreview(path: string): string {
     try {
       const abs = path.startsWith("/") ? path : join(opts.projectRoot, ".genpi", "runs", path);
@@ -355,31 +374,25 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
     // /genpi-stop：废弃当前 run（台账保留，可 --resume）——卡死时的 TUI 内出口（契约 19）
     pi.registerCommand("genpi-stop", {
       description: "废弃当前 run（台账保留，可 --resume 续跑）",
-      handler: async () => {
-        // 台账兜底：resume 失败等场景 currentRunId 可能为空但台账仍有活跃 run（修复死锁）
-        let runId: string | null | undefined = currentRunId;
-        if (!runId) {
-          const active = (await ledger.listRuns(opts.projectRoot)).find((r) => r.status === "active" || r.status === "gate");
-          runId = active?.id;
-        }
-        if (!runId) {
-          uiRef?.notify("当前没有活跃 run", "info");
-          return;
-        }
-        if (answerResolver) {
-          answerResolver("（用户已废弃 run，请停止当前步骤）");
-          answerResolver = null;
-        }
-        await engine.stop(runId);
-      },
+      handler: () => stopActiveRun(), // 实现共享 stopActiveRun（Q&A 期输入分支同用，自洽修复）
     });
     pi.on("session_start", (_event, ctx) => {
       uiRef = ctx.ui;
       if (ctx.model) lastModel = `${ctx.model.provider}/${ctx.model.id}`; // 步骤会话跟随 /model 切换
-      // escape 中断当前 step（契约 19）：仅在 step 流式进行时接管，避免抢编辑器的 Esc 语义
+      // escape 中断当前 step（契约 19）：流式期与 Q&A 等待期都可中断（自洽修复：等待提问不再是逃生盲区），
+      // 其余相位不接管，避免抢编辑器的 Esc 语义
       ctx.ui.onTerminalInput((data) => {
-        if (data === "\x1b" && streaming && currentRunId && phase === "run") {
+        if (data !== "\x1b" || !currentRunId) return undefined;
+        if (streaming && phase === "run") {
           streaming = false;
+          engine.abort();
+          say("⏹ 中断当前步骤…（run 保留，可继续或 /genpi-stop 废弃）");
+          return { consume: true };
+        }
+        if (phase === "awaiting-answer" && answerResolver) {
+          // Q&A 期 escape：挂起问题按「用户中断」作答 + abort 置标志——下一问/步边界消费，run 转 stopped
+          answerResolver("（用户中断，请停止当前步骤）");
+          answerResolver = null;
           engine.abort();
           say("⏹ 中断当前步骤…（run 保留，可继续或 /genpi-stop 废弃）");
           return { consume: true };
@@ -421,7 +434,7 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
       if (!text) return { action: "continue" };
       // T35：pi 原生命令透传——/resume /new /theme 等斜杠命令曾被 input 接管当需求路由
       // （实测 /resume 被吞成 [genpi/progress] 路由消息，会话选择器永不出现）；genpi 自有命令除外
-      if ((phase === "idle" || phase === "run" || phase === "gate") && text.startsWith("/") && !/^\/genpi\b/i.test(text)) {
+      if ((phase === "idle" || phase === "run" || phase === "gate" || phase === "awaiting-answer") && text.startsWith("/") && !/^\/genpi\b/i.test(text)) {
         return { action: "continue" };
       }
       const echoUser = () => pi.appendEntry("genpi/user", { text: `› ${text}` });
@@ -450,6 +463,12 @@ export async function runTui(opts: RunTuiOptions): Promise<number> {
       if (phase === "gate" && /^(p|预览|preview)$/i.test(text)) {
         echoUser();
         say(gatePreviewText());
+        return { action: "handled" };
+      }
+      // Q&A 期 /genpi-stop 不能被抢答吞掉（自洽修复）：显式走废弃流程；答案出口只留给真回答
+      if (phase === "awaiting-answer" && /^\/genpi-stop$/i.test(text)) {
+        echoUser();
+        void stopActiveRun();
         return { action: "handled" };
       }
       const r = routeUserInput(phase, currentRunId, text, pendingResume !== null);

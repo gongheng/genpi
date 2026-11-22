@@ -481,12 +481,17 @@ export class LoopEngine {
         const a = await this.deps.ask(q);
         const prev = this.qa.get(runId) ?? "";
         this.qa.set(runId, `${prev}Q:${q}\nA:${a}\n`);
-      }
-      // Q&A 等待期间被 stop/abort：立即终止，不再多跑一步
-      const recNow = await this.deps.ledger.readRun(runDir);
-      if (recNow.status !== "active") {
-        this.pendingAbort = false;
-        return { ok: false, aborted: true, summary: "Q&A 期间停止", artifacts: [], evidence: [] };
+        // Q&A 等待期间被 stop/abort（含 Q&A 期 escape//genpi-stop，自洽修复）：逐问检查——
+        // 立即终止，不再多问也不再多跑一步（旧版整批问完才查，废弃后还会把下一问抛给用户）
+        if (this.pendingAbort) {
+          this.pendingAbort = false;
+          return { ok: false, aborted: true, summary: "Q&A 期间停止", artifacts: [], evidence: [] };
+        }
+        const recNow = await this.deps.ledger.readRun(runDir);
+        if (recNow.status !== "active") {
+          this.pendingAbort = false;
+          return { ok: false, aborted: true, summary: "Q&A 期间停止", artifacts: [], evidence: [] };
+        }
       }
     }
   }

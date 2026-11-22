@@ -268,4 +268,41 @@ describe("worktree + MR", () => {
     expect(results[1]?.ok).toBe(true); // 双缺：无需清理
     expect(results[1]?.note).toContain("均已不存在");
   });
+
+  it("⑩ 自洽修复：平台匹配才走 gh——gitee/gitlab 远端（或 mrTarget 平台不符）直接降级 compare，不白调 GitHub CLI", async () => {
+    const cmds: string[] = [];
+    const exec: ExecFn = async (_cwd, cmd) => {
+      cmds.push(cmd);
+      if (cmd.includes("git remote get-url")) return { code: 0, out: "git@gitee.com:bob/app.git\n" };
+      if (cmd.includes("git rev-parse --abbrev-ref")) return { code: 0, out: "feature/x\n" };
+      return { code: 0, out: "" };
+    };
+    const ops = createGitOps(exec, { ghPath: "gh" });
+    // 远端 gitee + mrTarget 默认 github：平台不符 → manual + gitee compare，gh 零调用
+    const r1 = await ops.pushAndMr("/w", { mrTarget: "github", runId: "x", summary: "s" });
+    expect(r1.mode).toBe("manual");
+    expect(r1.url).toContain("gitee.com/bob/app/compare/feature/x");
+    expect(cmds.some((c) => c.includes("pr create"))).toBe(false); // 不白调 GitHub CLI
+    // 显式 mrTarget gitee：无 gitee CLI 支持 → 同样直接降级
+    cmds.length = 0;
+    const r2 = await ops.pushAndMr("/w", { mrTarget: "gitee", runId: "x", summary: "s" });
+    expect(r2.mode).toBe("manual");
+    expect(r2.url).toContain("gitee.com");
+    expect(cmds.some((c) => c.includes("pr create"))).toBe(false); // 显式 gitee 同样不白调
+    // github 远端 + mrTarget github：gh 照常（回归守护）
+    cmds.length = 0;
+    const opsGh = createGitOps(
+      async (_cwd, cmd) => {
+        cmds.push(cmd);
+        if (cmd.includes("git remote get-url")) return { code: 0, out: "git@github.com:alice/blog.git\n" };
+        if (cmd.includes("git rev-parse --abbrev-ref")) return { code: 0, out: "feature/y\n" };
+        if (cmd.includes('"gh" pr create')) return { code: 0, out: "https://github.com/pull/9\n" };
+        return { code: 0, out: "" };
+      },
+      { ghPath: "gh" },
+    );
+    const r3 = await opsGh.pushAndMr("/w", { mrTarget: "github", runId: "y", summary: "s" });
+    expect(r3.mode).toBe("mr");
+    expect(cmds.some((c) => c.includes("pr create"))).toBe(true);
+  });
 });

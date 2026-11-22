@@ -91,6 +91,9 @@ export function createGitOps(exec: ExecFn, opts: GitOpsOptions = {}): GitOps {
       }
       const compare = normalizeCompareUrl(remote, branch);
       if (o.mrTarget === "none") return { mode: "manual", url: compare };
+      // 平台自洽（自审三轮）：gh 是 GitHub CLI——仅当 mrTarget=github 且远端真是 github 时才调用；
+      // 配了 gitee/gitlab 或远端平台不符时直接降级 compare，不再白调 GitHub CLI 失败一次
+      if (o.mrTarget !== "github" || remoteHost(remote) !== "github.com") return { mode: "manual", url: compare };
       const ghOk = await exec(worktreeDir, `"${gh}" --version`);
       if (ghOk.code !== 0) return { mode: "manual", url: compare };
       const mr = await exec(
@@ -104,6 +107,14 @@ export function createGitOps(exec: ExecFn, opts: GitOpsOptions = {}): GitOps {
       return { mode: "mr", url: url ?? compare };
     },
   };
+}
+
+/** origin URL → 平台 host（github/gitee/gitlab 之一；其余 null）——MR CLI 选择与 compare URL 共用。 */
+export function remoteHost(remote: string): "github.com" | "gitee.com" | "gitlab.com" | null {
+  if (remote.includes("github.com")) return "github.com";
+  if (remote.includes("gitee.com")) return "gitee.com";
+  if (remote.includes("gitlab.com")) return "gitlab.com";
+  return null;
 }
 
 /** origin URL → compare URL（github/gitlab 形态；其余原样退回）。 */

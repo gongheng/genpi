@@ -741,4 +741,49 @@ describe("IMPLEMENT 逐任务循环", () => {
     await expect(new LoopEngine(w.deps).resume(runId)).rejects.toThrow("不可恢复");
     expect(ensureCount).toBe(before); // 关键：不为终态 run 创建 worktree/分支
   });
+
+  it("㉞ 自洽修复：Q&A 期间 stop/escape 逐问生效——第二问不再抛给用户，run 转 stopped", async () => {
+    const mkQAWorld = () => {
+      const w = makeWorld((spec, n) => {
+        if (spec.state === "CLARIFY" && n === 1) return { questions: ["Q1?", "Q2?"], result: ok() };
+        return { result: ok() };
+      });
+      let release!: (v: string) => void;
+      const gate = new Promise<string>((r) => (release = r));
+      w.deps.ask = async (q) => {
+        w.asked.push(q);
+        return w.asked.length === 1 ? await gate : "好的"; // 第一问挂起等测试放行（确定性）
+      };
+      return { w, release: () => release("用户操作") };
+    };
+    // 场景一：第一问挂起时 /genpi-stop（stop 置 stopped + pendingAbort）
+    {
+      const { w, release } = mkQAWorld();
+      const engine = new LoopEngine(w.deps);
+      let runId = "";
+      const startP = engine.start("feature", w.request, (id) => (runId = id)).then(() => "resolved");
+      await vi.waitFor(() => expect(w.asked).toEqual(["Q1?"]));
+      await engine.stop(runId); // 用户 /genpi-stop：run 置 stopped，drive 仍挂在 ask 上
+      release();
+      await startP;
+      expect(w.asked).toEqual(["Q1?"]); // Q2 未再抛出
+      const rec = JSON.parse(readFileSync(join(w.projectRoot, ".genpi", "runs", runId, "run.json"), "utf8"));
+      expect(rec.status).toBe("stopped");
+    }
+    // 场景二：第一问挂起时 escape（abort 置 pendingAbort，不 stop）——drive 收 aborted 后置 stopped
+    {
+      const { w, release } = mkQAWorld();
+      const engine = new LoopEngine(w.deps);
+      let runId = "";
+      const startP = engine.start("feature", w.request, (id) => (runId = id)).then(() => "resolved");
+      await vi.waitFor(() => expect(w.asked).toEqual(["Q1?"]));
+      engine.abort(); // Q&A 期 escape
+      release();
+      await startP;
+      expect(w.asked).toEqual(["Q1?"]);
+      const rec = JSON.parse(readFileSync(join(w.projectRoot, ".genpi", "runs", runId, "run.json"), "utf8"));
+      expect(rec.status).toBe("stopped");
+      expect(w.events.some((e) => e.type === "run_stopped")).toBe(true);
+    }
+  });
 });

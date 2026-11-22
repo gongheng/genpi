@@ -110,7 +110,7 @@
 ```bash
 # 源码开发
 npm install && npm run build && npm link
-npm test                     # 122 用例（引擎/路由/风险分级/证据强制/TUI 纯函数/E2E/扩展），全 mock 无需凭证（⑮ 为真实 SDK 事件形状钉子，无模型）
+npm test                     # 124 用例（引擎/路由/风险分级/证据强制/TUI 纯函数/E2E/扩展），全 mock 无需凭证（⑮ 为真实 SDK 事件形状钉子，无模型）
 npm run check:resources      # 方法论无项目耦合残留
 
 # 体验（无模型凭证也能看交互）
@@ -131,7 +131,7 @@ TUI 内交互速查：
 | `继续` / `continue` / `resume` | 续跑挂起的旧循环（stopped/gate 均可，v1.7/v1.8） |
 | `a` / `c <意见>` / `r` / `p` | 门禁期：批准/要求修改/终止/预览审批对象（聊天命令，防误触） |
 | 运行中输入任意文字 | steering：下一 step 边界注入，不跳状态不扣预算 |
-| `escape` | 中断当前步骤（不扣预算，run 转 stopped 可续跑） |
+| `escape` | 中断当前步骤（不扣预算，run 转 stopped 可续跑；Q&A 等待期同样生效——期间 `/genpi-stop` 也不再被当作答案） |
 | `/genpi-stop` | 废弃当前 run（台账保留） |
 | `/genpi log [n]` | 当前/最近 run 转移史尾部（路由/推进/预算/诊断留痕，T30） |
 | `/model` `/theme` 等 | pi 原生命令照常可用 |
@@ -199,7 +199,7 @@ while (rec.status === "active") {
 
 ### 5.5 worktree 隔离与生命周期（worktree.ts）
 
-feature/bugfix 在 `.worktrees/<runId>/` 建独立分支（前缀 `feature/`），主工作树零污染；`baseSha` 记入 run.json 供 GATE_MR 预览 diff。`ensureWorktree` 返回 `created` 标志：新建后按需执行 `worktreeSetup` 配置命令（如 `npm ci`）——新 worktree 无 gitignored 依赖，不引导则首次 VERIFY 必白烧一轮 budget+DEBUG 才发现「依赖没装」（v1.10；失败告警不阻塞）。目录被清但分支保留时自动挂回既有分支（`created=false`，resume 补建用）。`mrPreview()` 机器检查**提交完整性**：零提交（MR 将为空）或 worktree 有未提交变更（push 不含）→ 预览顶部警告。`pushAndMr()`：有 `gh` → 建 MR；无 → push + compare URL 降级。终态 run 的 worktree/分支用 `genpi clean [--force]` 清理（干跑列示，台账永久保留）；**防丢检查**：分支 tip 未被任何远端引用包含（未推送/推送降级/中断的 run）时 worktree 与分支均自动保留并给出手动出路——本地未推送提交永不因 clean 丢失。genpi 永不改 `.gitignore`/git 配置（契约 8）。
+feature/bugfix 在 `.worktrees/<runId>/` 建独立分支（前缀 `feature/`），主工作树零污染；`baseSha` 记入 run.json 供 GATE_MR 预览 diff。`ensureWorktree` 返回 `created` 标志：新建后按需执行 `worktreeSetup` 配置命令（如 `npm ci`）——新 worktree 无 gitignored 依赖，不引导则首次 VERIFY 必白烧一轮 budget+DEBUG 才发现「依赖没装」（v1.10；失败告警不阻塞）。目录被清但分支保留时自动挂回既有分支（`created=false`，resume 补建用）。`mrPreview()` 机器检查**提交完整性**：零提交（MR 将为空）或 worktree 有未提交变更（push 不含）→ 预览顶部警告。`pushAndMr()`：**平台匹配才走 gh**（`remoteHost` 检测——gh 是 GitHub CLI，仅 mrTarget=github 且远端真是 github 时调用；gitee/gitlab 远端或平台不符直接降级 compare，不白调）；成功 → 建 MR（描述由 mr-body.md 富化）；无/失败 → push + compare URL 降级。终态 run 的 worktree/分支用 `genpi clean [--force]` 清理（干跑列示，台账永久保留）；**防丢检查**：分支 tip 未被任何远端引用包含（未推送/推送降级/中断的 run）时 worktree 与分支均自动保留并给出手动出路——本地未推送提交永不因 clean 丢失。genpi 永不改 `.gitignore`/git 配置（契约 8）。
 
 ### 5.6 TUI 编排（tui/app.ts）——薄桥的设计
 
@@ -239,13 +239,13 @@ feature/bugfix 在 `.worktrees/<runId>/` 建独立分支（前缀 `feature/`）�
 
 ---
 
-## 7. 测试地图（122 用例，全部无需真模型）
+## 7. 测试地图（124 用例，全部无需真模型）
 
 | 测试文件 | 覆盖 | 怎么 mock |
 | --- | --- | --- |
-| `engine.test.ts`（34） | ★drive 循环全语义：四路径转移/GATE 死等/budget 连续语义（交错重置）/request_changes 不扣/steering/resume（含承接重建与补建 worktree；终态不白建）/中断/搁置不毒死新 run/T0 短链/T2 注入/prd 循环/CLARIFY 豁免/标题落账/pinned 接线/worktreeSetup/用量落账/worktree 失败置 stopped/active.lock 原子单活跃/mr-body 富化 | StepRunner 全 mock（makeWorld） |
+| `engine.test.ts`（35） | ★drive 循环全语义：四路径转移/GATE 死等/budget 连续语义（交错重置）/request_changes 不扣/steering/resume（含承接重建与补建 worktree；终态不白建）/中断/Q&A 期间 stop/escape 逐问终止/搁置不毒死新 run/T0 短链/T2 注入/prd 循环/CLARIFY 豁免/标题落账/pinned 接线/worktreeSetup/用量落账/worktree 失败置 stopped/active.lock 原子单活跃/mr-body 富化 | StepRunner 全 mock（makeWorld） |
 | `step-runner.test.ts`（17） | SDK seam：注入装载/证据交叉校验（伪造 exitCode→fail）/恒真式+平凡命令审计拒绝与放行清单（含 pipefail 管道）/pinned 三情形/产物非空/用量聚合/**真实 SDK 事件形状钉子⑮（嵌套 bash 照发 tool_execution_*，exitCode 在 structuredContent.exit_code）**/services 缓存⑯/缺字段诊断⑰ | `setSessionFactoryForTest` |
-| `worktree.test.ts`（13） | 真实 git 仓：worktree 隔离/挂回既有分支/复用补 baseSha/mrPreview/提交完整性警告/planCleanup+executeCleanup（干跑与执行，未推送分支防丢保留；已删分支仅清 worktree）/pushAndMr body-file | 玩具 git 仓/fake exec |
+| `worktree.test.ts`（14） | 真实 git 仓：worktree 隔离/挂回既有分支/复用补 baseSha/mrPreview/提交完整性警告/planCleanup+executeCleanup（干跑与执行，未推送分支防丢保留；已删分支仅清 worktree）/pushAndMr body-file/平台匹配才走 gh | 玩具 git 仓/fake exec |
 | `ledger.test.ts`（3） | 台账原子写：tmp+rename 无残留、后写为准；active.lock 原子占位（独占/接管/验主幂等）；conversation 裁剪（bounded 增长） | 临时目录 |
 | `e2e-headless.test.ts`（3） | 垂直切片：feature 全循环四件产物/push 降级/单活跃 | fake runner+玩具仓 |
 | `tui.test.ts` + `screens.test.ts`（17） | 纯函数：routeUserInput 分流/parseGateCommand/渲染（含用量展示） | 无 mock（纯函数） |
